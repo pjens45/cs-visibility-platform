@@ -1,0 +1,23 @@
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*.swo
+*~
+
+# Uploads / debug exports
+*.csv
+*.zip
+
+# Old versions / drafts
+*.docx
+*.pdf
+*.html
+*.json
+
+# Keep only the script and docs
+!cs_command_center_apps_script_v2.js
+!README.md
+!.gitignore
