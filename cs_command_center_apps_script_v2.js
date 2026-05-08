@@ -47,18 +47,61 @@ const CONFIG = {
     endHour: 17,    // 5:00 PM
     workDays: [1, 2, 3, 4, 5],  // Mon=1 through Fri=5
   },
-  // SLA TARGETS (Manager's official thresholds)
-  // Phone Answer Rate: customizable target (set green threshold to your goal)
-  // Email First Response: 12 business hours
-  // Median FRT: 12 hours or less = Green
-  thresholds: {
-    oldestUnanswered: { green: 12, yellow: 24 },     // hours — 12h SLA, 24h = critical
-    openBacklog:      { green: 30, yellow: 50 },     // ticket count
-    phoneAnswerRate:  { green: 75, yellow: 60 },     // % — Goal: 75%+ answer rate
-    medianFRT:        { green: 12, yellow: 24 },     // hours — 12h = Green per SLA
-    avgWaitTime:      { green: 30, yellow: 60 },     // seconds
-  },
+  // SLA TARGETS — loaded from Script Properties at runtime (see loadThresholds below)
+  // Fallback defaults are used if properties aren't set.
+  thresholds: null,  // populated by loadThresholds()
 };
+
+// Default thresholds — used when Script Properties aren't set
+const DEFAULT_THRESHOLDS = {
+  oldestUnanswered: { green: 12, yellow: 24 },     // hours — 12h SLA, 24h = critical
+  openBacklog:      { green: 30, yellow: 50 },     // ticket count
+  phoneAnswerRate:  { green: 75, yellow: 60 },     // % — Goal: 75%+ answer rate
+  medianFRT:        { green: 12, yellow: 24 },     // hours — 12h = Green per SLA
+  avgWaitTime:      { green: 30, yellow: 60 },     // seconds
+};
+
+// Load thresholds from Script Properties with fallback to defaults.
+// Script Properties (all optional):
+//   SLA_EMAIL_GREEN=12         SLA_EMAIL_YELLOW=24
+//   SLA_BACKLOG_GREEN=30       SLA_BACKLOG_YELLOW=50
+//   SLA_PHONE_GREEN=75         SLA_PHONE_YELLOW=60
+//   SLA_FRT_GREEN=12           SLA_FRT_YELLOW=24
+//   SLA_WAIT_GREEN=30          SLA_WAIT_YELLOW=60
+function loadThresholds() {
+  const props = PropertiesService.getScriptProperties();
+  const d = DEFAULT_THRESHOLDS;
+
+  function num(key, fallback) {
+    const val = props.getProperty(key);
+    if (val === null || val === "") return fallback;
+    const parsed = Number(val);
+    return isNaN(parsed) ? fallback : parsed;
+  }
+
+  CONFIG.thresholds = {
+    oldestUnanswered: {
+      green:  num("SLA_EMAIL_GREEN",   d.oldestUnanswered.green),
+      yellow: num("SLA_EMAIL_YELLOW",  d.oldestUnanswered.yellow),
+    },
+    openBacklog: {
+      green:  num("SLA_BACKLOG_GREEN",  d.openBacklog.green),
+      yellow: num("SLA_BACKLOG_YELLOW", d.openBacklog.yellow),
+    },
+    phoneAnswerRate: {
+      green:  num("SLA_PHONE_GREEN",  d.phoneAnswerRate.green),
+      yellow: num("SLA_PHONE_YELLOW", d.phoneAnswerRate.yellow),
+    },
+    medianFRT: {
+      green:  num("SLA_FRT_GREEN",  d.medianFRT.green),
+      yellow: num("SLA_FRT_YELLOW", d.medianFRT.yellow),
+    },
+    avgWaitTime: {
+      green:  num("SLA_WAIT_GREEN",  d.avgWaitTime.green),
+      yellow: num("SLA_WAIT_YELLOW", d.avgWaitTime.yellow),
+    },
+  };
+}
 
 // --- DEAKO BRAND COLORS (from Logo Usage Guidelines 2025) ---
 const BRAND = {
@@ -84,6 +127,7 @@ const BRAND = {
 
 // --- MAIN REFRESH FUNCTION ---
 function refreshDashboard() {
+  loadThresholds();  // read SLA targets from Script Properties (falls back to defaults)
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const runLog = getOrCreateSheet(ss, "Run Log");
   const startTime = new Date();
@@ -94,10 +138,11 @@ function refreshDashboard() {
     const csatData = fetchNicereplyCSAT();
     const postCallData = readPostCallCSAT();
     const smsData = readSMSActivity();
+    const metaData = fetchMetaStatus();
 
     writeZendeskRaw(ss, zendeskData);
     writeAircallRaw(ss, aircallData);
-    writeDashboard(ss, zendeskData, aircallData, csatData, postCallData, smsData);
+    writeDashboard(ss, zendeskData, aircallData, csatData, postCallData, smsData, metaData);
 
     logRun(runLog, startTime, "SUCCESS", "");
   } catch (error) {
@@ -903,11 +948,11 @@ function processNicereplyResponses(responses, since) {
 // =============================================================
 // DASHBOARD LAYOUT — Calm, minimal, on-brand instrument panel
 // =============================================================
-function writeDashboard(ss, zendesk, aircall, csat, postCall, sms) {
+function writeDashboard(ss, zendesk, aircall, csat, postCall, sms, meta) {
   // Build on a hidden staging sheet, then swap — eliminates the 5-min blink
   const staging = getOrCreateSheet(ss, "_Staging");
   staging.showSheet(); // ensure it exists and is accessible
-  _writeDashboardContent(ss, staging, zendesk, aircall, csat, postCall, sms);
+  _writeDashboardContent(ss, staging, zendesk, aircall, csat, postCall, sms, meta);
 
   // Swap staging content → Dashboard in one batch
   const dash = getOrCreateSheet(ss, "Dashboard");
@@ -938,7 +983,7 @@ function writeDashboard(ss, zendesk, aircall, csat, postCall, sms) {
   staging.hideSheet();
 }
 
-function _writeDashboardContent(ss, dash, zendesk, aircall, csat, postCall, sms) {
+function _writeDashboardContent(ss, dash, zendesk, aircall, csat, postCall, sms, meta) {
   dash.clear();
   dash.clearFormats();
 
@@ -950,6 +995,7 @@ function _writeDashboardContent(ss, dash, zendesk, aircall, csat, postCall, sms)
   // --- Brand-aligned palette ---
   const bg       = BRAND.white;          // #FAFAFA
   const cardBg   = "#FFFFFF";
+  const altRow   = "#F5F5F3";            // subtle zebra stripe for table rows
   const divider  = BRAND.beigeLight;     // #E1DFDD
   const navy     = BRAND.airBlueDark;    // #1B3747
   const darkText = BRAND.black;          // #1D1D1D
@@ -1190,6 +1236,11 @@ function _writeDashboardContent(ss, dash, zendesk, aircall, csat, postCall, sms)
   dash.getRange(`H${k5}`).setBackground(bg);
   dash.getRange(`I${k5}:N${k5}`).setBackground(phoneAccent);
 
+  // Card borders around KPI panels for visual grouping
+  const kpiBorder = { style: SpreadsheetApp.BorderStyle.SOLID, color: divider };
+  dash.getRange(`A${k1}:G${k4}`).setBorder(true, true, true, true, false, false, divider, SpreadsheetApp.BorderStyle.SOLID);
+  dash.getRange(`I${k1}:N${k4}`).setBorder(true, true, true, true, false, false, divider, SpreadsheetApp.BorderStyle.SOLID);
+
   // Spacer row after KPIs
   const spacerRow = k5 + 1;
   dash.setRowHeight(spacerRow, 10);
@@ -1317,15 +1368,16 @@ function _writeDashboardContent(ss, dash, zendesk, aircall, csat, postCall, sms)
     dash.setRowHeight(tRow, 22);
     const subj = ticket.subject.length > 42 ? ticket.subject.substring(0, 42) + "..." : ticket.subject;
     const waitStr = formatBizMinutes(ticket.waitBizMin);
+    const rowBgT = idx % 2 === 1 ? altRow : cardBg; // zebra stripe
 
     const ticketUrl = `https://${CONFIG.zendesk.subdomain}.zendesk.com/agent/tickets/${ticket.id}`;
     dash.getRange(`A${tRow}`).setFormula(`=HYPERLINK("${ticketUrl}","${ticket.id}")`)
       .setFontSize(9).setFontColor("#1155CC")
-      .setHorizontalAlignment("right").setBackground(cardBg);
+      .setHorizontalAlignment("right").setBackground(rowBgT);
     dash.getRange(`B${tRow}:D${tRow}`).merge().setValue(subj)
-      .setFontSize(9).setBackground(cardBg);
+      .setFontSize(9).setBackground(rowBgT);
     dash.getRange(`E${tRow}`).setValue(ticket.assignee.split(" ")[0])
-      .setFontSize(9).setBackground(cardBg);
+      .setFontSize(9).setBackground(rowBgT);
 
     // Wait — top 3 get risk tint, rest get amber if past SLA
     dash.getRange(`F${tRow}`).setValue(waitStr).setFontSize(9).setHorizontalAlignment("right");
@@ -1334,11 +1386,11 @@ function _writeDashboardContent(ss, dash, zendesk, aircall, csat, postCall, sms)
     } else if (ticket.pastSla) {
       dash.getRange(`F${tRow}`).setBackground(amberLt).setFontColor(amber);
     } else {
-      dash.getRange(`F${tRow}`).setBackground(cardBg).setFontColor(green);
+      dash.getRange(`F${tRow}`).setBackground(rowBgT).setFontColor(green);
     }
 
     dash.getRange(`G${tRow}`).setValue(ticket.status).setFontSize(9)
-      .setFontColor(gray).setBackground(cardBg);
+      .setFontColor(gray).setBackground(rowBgT);
     dash.getRange(`A${tRow}:G${tRow}`).setBorder(false, false, true, false, false, false, divider, SpreadsheetApp.BorderStyle.SOLID);
     tRow++;
   });
@@ -1445,34 +1497,35 @@ function _writeDashboardContent(ss, dash, zendesk, aircall, csat, postCall, sms)
     dash.getRange(`A${tRow}:G${tRow}`).setBorder(false, false, true, false, false, false, divider, SpreadsheetApp.BorderStyle.SOLID);
     tRow++;
 
-    csatResponses.forEach(r => {
+    csatResponses.forEach((r, csIdx) => {
       dash.setRowHeight(tRow, 22);
+      const csRowBg = csIdx % 2 === 1 ? altRow : cardBg;
 
       // Score — color-coded
       const scoreStr = r.score + "/" + r.maxScore;
       const scoreColor = r.satisfied ? green : risk;
-      const scoreBg = r.satisfied ? cardBg : riskLt;
+      const scoreBg = r.satisfied ? csRowBg : riskLt;
       dash.getRange(`A${tRow}`).setValue(scoreStr)
         .setFontSize(9).setFontWeight("bold").setFontColor(scoreColor).setBackground(scoreBg);
 
       // Customer email
       const emailDisplay = r.email.length > 30 ? r.email.substring(0, 30) + "..." : r.email;
       dash.getRange(`B${tRow}:D${tRow}`).merge().setValue(emailDisplay)
-        .setFontSize(9).setBackground(cardBg);
+        .setFontSize(9).setBackground(csRowBg);
 
       // Ticket ID — hyperlinked to Zendesk
       if (r.ticketId) {
         const csatTicketUrl = `https://${CONFIG.zendesk.subdomain}.zendesk.com/agent/tickets/${r.ticketId}`;
         dash.getRange(`E${tRow}`).setFormula(`=HYPERLINK("${csatTicketUrl}","${r.ticketId}")`)
-          .setFontSize(9).setFontColor("#1155CC").setBackground(cardBg).setHorizontalAlignment("right");
+          .setFontSize(9).setFontColor("#1155CC").setBackground(csRowBg).setHorizontalAlignment("right");
       } else {
         dash.getRange(`E${tRow}`).setValue("")
-          .setFontSize(9).setFontColor(gray).setBackground(cardBg).setHorizontalAlignment("right");
+          .setFontSize(9).setFontColor(gray).setBackground(csRowBg).setHorizontalAlignment("right");
       }
 
       // Time
       dash.getRange(`F${tRow}:G${tRow}`).merge().setValue(r.dateStr + " " + r.timeStr)
-        .setFontSize(9).setBackground(cardBg).setHorizontalAlignment("right");
+        .setFontSize(9).setBackground(csRowBg).setHorizontalAlignment("right");
 
       dash.getRange(`A${tRow}:G${tRow}`).setBorder(false, false, true, false, false, false, divider, SpreadsheetApp.BorderStyle.SOLID);
       tRow++;
@@ -1679,19 +1732,20 @@ function _writeDashboardContent(ss, dash, zendesk, aircall, csat, postCall, sms)
     dash.getRange(`I${paRow}:N${paRow}`).setBorder(false, false, true, false, false, false, divider, SpreadsheetApp.BorderStyle.SOLID);
     paRow++;
 
-    pcResponses.forEach(r => {
+    pcResponses.forEach((r, pcIdx) => {
       dash.setRowHeight(paRow, 22);
       const scoreStr = r.score + "/" + r.maxScore;
       const scoreColor = r.satisfied ? green : risk;
-      const scoreBg = r.satisfied ? cardBg : riskLt;
+      const scoreBg = r.satisfied ? (pcIdx % 2 === 1 ? altRow : cardBg) : riskLt;
+      const pcRowBg = pcIdx % 2 === 1 ? altRow : cardBg;
       dash.getRange(`I${paRow}`).setValue(scoreStr)
         .setFontSize(9).setFontWeight("bold").setFontColor(scoreColor).setBackground(scoreBg);
       dash.getRange(`J${paRow}:K${paRow}`).merge().setValue(r.phone)
-        .setFontSize(9).setBackground(cardBg);
+        .setFontSize(9).setBackground(pcRowBg);
       dash.getRange(`L${paRow}`).setValue(r.agent ? r.agent.split(" ")[0] : "")
-        .setFontSize(9).setBackground(cardBg);
+        .setFontSize(9).setBackground(pcRowBg);
       dash.getRange(`M${paRow}:N${paRow}`).merge().setValue(r.dateStr + " " + r.timeStr)
-        .setFontSize(9).setBackground(cardBg).setHorizontalAlignment("right");
+        .setFontSize(9).setBackground(pcRowBg).setHorizontalAlignment("right");
       dash.getRange(`I${paRow}:N${paRow}`).setBorder(false, false, true, false, false, false, divider, SpreadsheetApp.BorderStyle.SOLID);
       paRow++;
     });
@@ -1813,6 +1867,196 @@ function _writeDashboardContent(ss, dash, zendesk, aircall, csat, postCall, sms)
     }
   }
 
+  // ─── Social — Meta Business Suite (Messenger + Instagram) ───
+  const metaConversations = (meta && meta.recentConversations) || [];
+  const metaComments = (meta && meta.recentComments) || [];
+  const metaUnread = (meta && meta.unreadDMs) || 0;
+  paRow++; // spacer
+  dash.getRange(`I${paRow}:N${paRow}`).merge()
+    .setValue("Social — Meta Business Suite")
+    .setBackground(navy).setFontColor("#FFFFFF")
+    .setFontSize(11).setFontWeight("bold").setVerticalAlignment("middle");
+  dash.setRowHeight(paRow, 26);
+  paRow++;
+
+  // Summary line — DMs + comments totals
+  const metaStatusColor = metaUnread > 0 ? amber : green;
+  const metaSummary = metaUnread > 0
+    ? `${metaUnread} unread DM${metaUnread !== 1 ? "s" : ""}`
+    : "DMs: all caught up";
+  const commentSummary = metaComments.length > 0
+    ? `${metaComments.length} comment${metaComments.length !== 1 ? "s" : ""}/mention${metaComments.length !== 1 ? "s" : ""} (24h)`
+    : "No new comments (24h)";
+  dash.setRowHeight(paRow, 20);
+  dash.getRange(`I${paRow}:J${paRow}`).merge()
+    .setValue(metaSummary)
+    .setFontSize(9).setFontWeight("bold").setFontColor(metaStatusColor).setBackground(bg);
+  dash.getRange(`K${paRow}:N${paRow}`).merge()
+    .setValue(commentSummary)
+    .setFontSize(9).setFontColor(metaComments.length > 0 ? amber : gray).setBackground(bg);
+  dash.getRange(`I${paRow}:N${paRow}`).setBorder(false, false, true, false, false, false, divider, SpreadsheetApp.BorderStyle.SOLID);
+  paRow++;
+
+  // Token expiry warning
+  if (meta && meta.tokenWarning) {
+    dash.setRowHeight(paRow, 20);
+    dash.getRange(`I${paRow}:N${paRow}`).merge()
+      .setValue(meta.tokenWarning)
+      .setFontSize(9).setFontWeight("bold").setFontColor(risk).setBackground(riskLt);
+    dash.getRange(`I${paRow}:N${paRow}`).setBorder(false, false, true, false, false, false, divider, SpreadsheetApp.BorderStyle.SOLID);
+    paRow++;
+  }
+
+  // ── DMs sub-header ──
+  dash.setRowHeight(paRow, 20);
+  dash.getRange(`I${paRow}:N${paRow}`).merge()
+    .setValue("Direct Messages")
+    .setFontWeight("bold").setFontSize(9).setFontColor(darkText).setBackground(bg);
+  dash.getRange(`I${paRow}:N${paRow}`).setBorder(false, false, true, false, false, false, divider, SpreadsheetApp.BorderStyle.SOLID);
+  paRow++;
+
+  if (metaConversations.length === 0) {
+    dash.setRowHeight(paRow, 22);
+    dash.getRange(`I${paRow}:N${paRow}`).merge()
+      .setValue("No recent conversations")
+      .setFontSize(9).setFontColor(gray).setFontStyle("italic").setBackground(cardBg);
+    dash.getRange(`I${paRow}:N${paRow}`).setBorder(false, false, true, false, false, false, divider, SpreadsheetApp.BorderStyle.SOLID);
+    paRow++;
+  } else {
+    // Column headers
+    dash.setRowHeight(paRow, 20);
+    dash.getRange(`I${paRow}`).setValue("Customer")
+      .setFontWeight("bold").setFontSize(9).setFontColor(gray).setBackground(bg);
+    dash.getRange(`J${paRow}`).setValue("Via")
+      .setFontWeight("bold").setFontSize(9).setFontColor(gray).setBackground(bg);
+    dash.getRange(`K${paRow}:L${paRow}`).merge().setValue("Last Message")
+      .setFontWeight("bold").setFontSize(9).setFontColor(gray).setBackground(bg);
+    dash.getRange(`M${paRow}`).setValue("From")
+      .setFontWeight("bold").setFontSize(9).setFontColor(gray).setBackground(bg);
+    dash.getRange(`N${paRow}`).setValue("Time")
+      .setFontWeight("bold").setFontSize(9).setFontColor(gray).setBackground(bg).setHorizontalAlignment("right");
+    dash.getRange(`I${paRow}:N${paRow}`).setBorder(false, false, true, false, false, false, divider, SpreadsheetApp.BorderStyle.SOLID);
+    paRow++;
+
+    // Show up to 10 conversations
+    metaConversations.slice(0, 10).forEach((convo, cIdx) => {
+      const rowBg = convo.unread > 0 ? amberLt : (cIdx % 2 === 1 ? altRow : cardBg);
+
+      // Row 1: Customer name (hyperlinked), platform badge, from, time
+      dash.setRowHeight(paRow, 20);
+      dash.getRange(`I${paRow}`)
+        .setFormula(`=HYPERLINK("${convo.inboxUrl}","${convo.customerName.replace(/"/g, '""')}")`)
+        .setFontSize(9).setFontColor("#1155CC").setBackground(rowBg);
+      // Platform badge
+      const platformShort = convo.platform === "Instagram" ? "IG" : "FB";
+      const platformColor = convo.platform === "Instagram" ? "#C13584" : "#1877F2";
+      dash.getRange(`J${paRow}`).setValue(platformShort)
+        .setFontSize(8).setFontWeight("bold").setFontColor(platformColor).setBackground(rowBg);
+      dash.getRange(`K${paRow}:L${paRow}`).merge()
+        .setBackground(rowBg);
+      dash.getRange(`M${paRow}`).setValue(convo.lastMessageFrom)
+        .setFontSize(8).setFontColor(gray).setBackground(rowBg);
+
+      // Format time
+      let timeDisplay = "";
+      if (convo.time) {
+        try {
+          const d = new Date(convo.time);
+          timeDisplay = Utilities.formatDate(d, Session.getScriptTimeZone(), "MMM d h:mm a");
+        } catch (e) { timeDisplay = ""; }
+      }
+      dash.getRange(`N${paRow}`).setValue(timeDisplay)
+        .setFontSize(8).setFontColor(gray).setBackground(rowBg).setHorizontalAlignment("right");
+      paRow++;
+
+      // Row 2: message excerpt
+      dash.setRowHeight(paRow, 18);
+      const excerpt = convo.lastMessage || "";
+      dash.getRange(`I${paRow}:N${paRow}`).merge().setValue(excerpt)
+        .setFontSize(8).setFontColor(gray).setFontStyle("italic").setBackground(rowBg)
+        .setWrapStrategy(SpreadsheetApp.WrapStrategy.CLIP);
+      dash.getRange(`I${paRow}:N${paRow}`).setBorder(false, false, true, false, false, false, divider, SpreadsheetApp.BorderStyle.SOLID);
+      paRow++;
+    });
+  }
+
+  // ── Comments & Mentions sub-header (last 24h) ──
+  paRow++; // spacer
+  dash.setRowHeight(paRow, 20);
+  dash.getRange(`I${paRow}:N${paRow}`).merge()
+    .setValue("Comments & Mentions (Last 24h)")
+    .setFontWeight("bold").setFontSize(9).setFontColor(darkText).setBackground(bg);
+  dash.getRange(`I${paRow}:N${paRow}`).setBorder(false, false, true, false, false, false, divider, SpreadsheetApp.BorderStyle.SOLID);
+  paRow++;
+
+  if (metaComments.length === 0) {
+    dash.setRowHeight(paRow, 22);
+    dash.getRange(`I${paRow}:N${paRow}`).merge()
+      .setValue("No new comments or mentions")
+      .setFontSize(9).setFontColor(gray).setFontStyle("italic").setBackground(cardBg);
+    dash.getRange(`I${paRow}:N${paRow}`).setBorder(false, false, true, false, false, false, divider, SpreadsheetApp.BorderStyle.SOLID);
+    paRow++;
+  } else {
+    // Column headers
+    dash.setRowHeight(paRow, 20);
+    dash.getRange(`I${paRow}`).setValue("Author")
+      .setFontWeight("bold").setFontSize(9).setFontColor(gray).setBackground(bg);
+    dash.getRange(`J${paRow}`).setValue("Source")
+      .setFontWeight("bold").setFontSize(9).setFontColor(gray).setBackground(bg);
+    dash.getRange(`K${paRow}:L${paRow}`).merge().setValue("Comment")
+      .setFontWeight("bold").setFontSize(9).setFontColor(gray).setBackground(bg);
+    dash.getRange(`M${paRow}`).setValue("On")
+      .setFontWeight("bold").setFontSize(9).setFontColor(gray).setBackground(bg);
+    dash.getRange(`N${paRow}`).setValue("Time")
+      .setFontWeight("bold").setFontSize(9).setFontColor(gray).setBackground(bg).setHorizontalAlignment("right");
+    dash.getRange(`I${paRow}:N${paRow}`).setBorder(false, false, true, false, false, false, divider, SpreadsheetApp.BorderStyle.SOLID);
+    paRow++;
+
+    metaComments.slice(0, 8).forEach((c, cmIdx) => {
+      const isMention = c.type === "mention";
+      const rowBg = isMention ? amberLt : (cmIdx % 2 === 1 ? altRow : cardBg);
+
+      dash.setRowHeight(paRow, 20);
+      // Author (hyperlinked to source)
+      const safeAuthor = c.author.replace(/"/g, '""');
+      dash.getRange(`I${paRow}`)
+        .setFormula(`=HYPERLINK("${c.url}","${safeAuthor}")`)
+        .setFontSize(9).setFontColor("#1155CC").setBackground(rowBg);
+      // Platform + type badge
+      const platformShort = c.platform === "Instagram" ? "IG" : "FB";
+      const platformColor = c.platform === "Instagram" ? "#C13584" : "#1877F2";
+      const label = isMention ? platformShort + " tag" : platformShort;
+      dash.getRange(`J${paRow}`).setValue(label)
+        .setFontSize(8).setFontWeight("bold").setFontColor(platformColor).setBackground(rowBg);
+      dash.getRange(`K${paRow}:L${paRow}`).merge()
+        .setBackground(rowBg);
+      // Post snippet in "On" column
+      dash.getRange(`M${paRow}`).setValue(c.postSnippet || "")
+        .setFontSize(8).setFontColor(gray).setBackground(rowBg)
+        .setWrapStrategy(SpreadsheetApp.WrapStrategy.CLIP);
+
+      // Format time
+      let timeDisplay = "";
+      if (c.time) {
+        try {
+          const d = new Date(c.time);
+          timeDisplay = Utilities.formatDate(d, Session.getScriptTimeZone(), "MMM d h:mm a");
+        } catch (e) { timeDisplay = ""; }
+      }
+      dash.getRange(`N${paRow}`).setValue(timeDisplay)
+        .setFontSize(8).setFontColor(gray).setBackground(rowBg).setHorizontalAlignment("right");
+      paRow++;
+
+      // Row 2: comment text
+      dash.setRowHeight(paRow, 18);
+      dash.getRange(`I${paRow}:N${paRow}`).merge().setValue(c.text || "")
+        .setFontSize(8).setFontColor(gray).setFontStyle("italic").setBackground(rowBg)
+        .setWrapStrategy(SpreadsheetApp.WrapStrategy.CLIP);
+      dash.getRange(`I${paRow}:N${paRow}`).setBorder(false, false, true, false, false, false, divider, SpreadsheetApp.BorderStyle.SOLID);
+      paRow++;
+    });
+  }
+
   // ─── COLUMN WIDTHS ───
   dash.setColumnWidth(1, 60);   // A
   dash.setColumnWidth(2, 110);  // B
@@ -1822,8 +2066,8 @@ function _writeDashboardContent(ss, dash, zendesk, aircall, csat, postCall, sms)
   dash.setColumnWidth(6, 70);   // F
   dash.setColumnWidth(7, 75);   // G
   dash.setColumnWidth(8, 20);   // H spacer
-  dash.setColumnWidth(9, 120);  // I — Agent name
-  dash.setColumnWidth(10, 40);  // J — In
+  dash.setColumnWidth(9, 115);  // I — Agent name / Customer
+  dash.setColumnWidth(10, 48);  // J — In / Via badge
   dash.setColumnWidth(11, 55);  // K — Dialed
   dash.setColumnWidth(12, 55);  // L — No Ans
   dash.setColumnWidth(13, 50);  // M — <90s
@@ -1831,11 +2075,11 @@ function _writeDashboardContent(ss, dash, zendesk, aircall, csat, postCall, sms)
 
   // Fill remaining
   const lastRow = Math.max(tRow, paRow) + 2;
-  dash.getRange(`A${lastRow}:N${lastRow + 3}`).setBackground(bg);
+  dash.getRange(`A${lastRow}:N${lastRow + 4}`).setBackground(bg);
 
   // Footer — version & goals
   dash.getRange(`A${lastRow}:N${lastRow}`).merge()
-    .setValue(`CS Command Center v1.3.8  ·  Refreshes every 5 min  ·  Goal: reply within ${slaHours} business hours · answer ${CONFIG.thresholds.phoneAnswerRate.green}%+ inbound calls · Mon–Fri 6a–5p PST`)
+    .setValue(`CS Command Center v1.4.0  ·  Refreshes every 5 min  ·  Goal: reply within ${slaHours} business hours · answer ${CONFIG.thresholds.phoneAnswerRate.green}%+ inbound calls · Mon–Fri 6a–5p PST`)
     .setFontColor(gray).setFontSize(8).setFontStyle("italic")
     .setHorizontalAlignment("center").setBackground(bg);
 
@@ -1848,6 +2092,8 @@ function _writeDashboardContent(ss, dash, zendesk, aircall, csat, postCall, sms)
     + `Oldest Waiting table: top 3 past SLA highlighted red, others past SLA amber, within SLA green`,
     `CSAT % = (satisfied ÷ total) × 100  ·  Satisfied = 4+ out of 5  ·  Phone answer rate = answered inbound ÷ total inbound (biz hrs only)  ·  `
     + `Open tickets exclude ${(CONFIG.excludeAgents || []).join(", ")} (not on CS team)`,
+    `Social: FB = Facebook Messenger, IG = Instagram DM  ·  Comments & Mentions show last 24h from FB + IG posts  ·  `
+    + `Amber highlight = unread DM or @mention  ·  Meta token expiry warning appears at 7 days`,
   ];
   dash.getRange(`A${legendRow}:N${legendRow}`).merge()
     .setValue(legendLines[0])
@@ -1859,6 +2105,10 @@ function _writeDashboardContent(ss, dash, zendesk, aircall, csat, postCall, sms)
     .setHorizontalAlignment("center").setBackground(bg).setWrap(false);
   dash.getRange(`A${legendRow + 2}:N${legendRow + 2}`).merge()
     .setValue(legendLines[2])
+    .setFontColor(gray).setFontSize(7).setFontStyle("italic")
+    .setHorizontalAlignment("center").setBackground(bg).setWrap(false);
+  dash.getRange(`A${legendRow + 3}:N${legendRow + 3}`).merge()
+    .setValue(legendLines[3])
     .setFontColor(gray).setFontSize(7).setFontStyle("italic")
     .setHorizontalAlignment("center").setBackground(bg).setWrap(false);
 }
@@ -2024,6 +2274,7 @@ function setupTrigger() {
 }
 
 function initializeSheet() {
+  loadThresholds();
   const ss = SpreadsheetApp.getActiveSpreadsheet();
 
   getOrCreateSheet(ss, "Dashboard");
@@ -2907,6 +3158,227 @@ function readPostCallCSAT() {
     : null;
 
   return { score: csatPct, total, satisfied, avgNps, responses: recent };
+}
+
+// --- FETCH META BUSINESS SUITE (Facebook Messenger + Instagram DMs) ---
+// Requires Script Properties: META_PAGE_TOKEN, META_PAGE_ID
+// Optional: META_IG_ID (Instagram Business Account ID — for IG-specific data)
+function fetchMetaStatus() {
+  const props = PropertiesService.getScriptProperties();
+  const pageToken = props.getProperty("META_PAGE_TOKEN");
+  const pageId = props.getProperty("META_PAGE_ID");
+
+  const emptyResult = {
+    unreadDMs: 0, totalConversations: 0, recentConversations: [],
+    recentComments: [], tokenWarning: null, error: null
+  };
+
+  if (!pageToken || !pageId) {
+    Logger.log("META_PAGE_TOKEN or META_PAGE_ID not set — skipping Meta fetch");
+    return emptyResult;
+  }
+
+  const baseUrl = "https://graph.facebook.com/v25.0";
+  const fetchOpts = { method: "get", muteHttpExceptions: true };
+  const now = new Date();
+  const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+  // Helper to make Graph API calls
+  function graphGet(path) {
+    const separator = path.includes("?") ? "&" : "?";
+    const raw = `${baseUrl}/${path}${separator}access_token=${pageToken}`;
+    const url = raw.replace(/\{/g, "%7B").replace(/\}/g, "%7D");
+    try {
+      const resp = UrlFetchApp.fetch(url, fetchOpts);
+      if (resp.getResponseCode() !== 200) {
+        const errText = resp.getContentText().substring(0, 300);
+        Logger.log("Meta API " + resp.getResponseCode() + ": " + errText);
+        return null;
+      }
+      return JSON.parse(resp.getContentText());
+    } catch (e) {
+      Logger.log("Meta API fetch error: " + e.toString());
+      return null;
+    }
+  }
+
+  // ── Helper: parse a conversations response into structured items ──
+  function parseConversations(data, platform) {
+    if (!data || !data.data) return [];
+    const items = [];
+    (data.data || []).forEach(convo => {
+      const unread = convo.unread_count || 0;
+      const participants = (convo.participants && convo.participants.data) || [];
+      const customer = participants.find(p => p.id !== pageId);
+      const customerName = customer ? customer.name : "Unknown";
+
+      const messages = (convo.messages && convo.messages.data) || [];
+      const latestMsg = messages[0] || {};
+      const msgText = latestMsg.message || "";
+      const msgTime = latestMsg.created_time || convo.updated_time || "";
+      const isFromPage = latestMsg.from && latestMsg.from.id === pageId;
+
+      const inboxUrl = `https://business.facebook.com/latest/inbox/all?asset_id=${pageId}&thread_id=${convo.id}`;
+
+      items.push({
+        id: convo.id,
+        customerName,
+        unread,
+        lastMessage: msgText.length > 80 ? msgText.substring(0, 80) + "..." : msgText,
+        lastMessageFrom: isFromPage ? "Deako" : customerName.split(" ")[0],
+        time: msgTime,
+        inboxUrl,
+        platform,
+      });
+    });
+    return items;
+  }
+
+  // ─── Step 1: Messenger DMs ───
+  const messengerData = graphGet(
+    `${pageId}/conversations?fields=id,updated_time,unread_count,participants,messages.limit(1){message,from,created_time}&limit=15`
+  );
+  const messengerConvos = parseConversations(messengerData, "Messenger");
+
+  // ─── Step 2: Instagram DMs (same endpoint, platform filter) ───
+  const igDMData = graphGet(
+    `${pageId}/conversations?platform=instagram&fields=id,updated_time,unread_count,participants,messages.limit(1){message,from,created_time}&limit=15`
+  );
+  const igConvos = parseConversations(igDMData, "Instagram");
+
+  // Merge conversations, deduplicate by id, sort: unread first then newest
+  const seenIds = new Set();
+  const allConversations = [];
+  [...messengerConvos, ...igConvos].forEach(c => {
+    if (!seenIds.has(c.id)) {
+      seenIds.add(c.id);
+      allConversations.push(c);
+    }
+  });
+  allConversations.sort((a, b) => {
+    if (a.unread !== b.unread) return b.unread - a.unread;
+    return new Date(b.time) - new Date(a.time);
+  });
+
+  let totalUnread = 0;
+  allConversations.forEach(c => { totalUnread += c.unread; });
+
+  // ─── Step 3: Auto-discover Instagram Business Account ID ───
+  let igAccountId = props.getProperty("META_IG_ID") || null;
+  if (!igAccountId) {
+    const pageInfo = graphGet(`${pageId}?fields=instagram_business_account`);
+    if (pageInfo && pageInfo.instagram_business_account) {
+      igAccountId = pageInfo.instagram_business_account.id;
+      Logger.log("Auto-discovered IG account: " + igAccountId);
+    }
+  }
+
+  // ─── Step 4: Facebook Post Comments (last 24h) ───
+  const recentComments = [];
+  const fbFeed = graphGet(
+    `${pageId}/feed?fields=id,message,permalink_url,comments.limit(10){id,from,message,created_time}&limit=5`
+  );
+  if (fbFeed && fbFeed.data) {
+    fbFeed.data.forEach(post => {
+      const comments = (post.comments && post.comments.data) || [];
+      comments.forEach(c => {
+        const cTime = new Date(c.created_time);
+        if (cTime < oneDayAgo) return; // only last 24h
+        const fromName = (c.from && c.from.name) || "Unknown";
+        // Skip comments from our own page
+        if (c.from && c.from.id === pageId) return;
+        const postSnippet = post.message
+          ? (post.message.length > 40 ? post.message.substring(0, 40) + "..." : post.message)
+          : "Post";
+        recentComments.push({
+          type: "comment",
+          platform: "Facebook",
+          author: fromName,
+          text: c.message.length > 80 ? c.message.substring(0, 80) + "..." : c.message,
+          time: c.created_time,
+          postSnippet,
+          url: post.permalink_url || `https://business.facebook.com/latest/inbox/all?asset_id=${pageId}`,
+        });
+      });
+    });
+  }
+
+  // ─── Step 5: Instagram Post Comments (last 24h) ───
+  if (igAccountId) {
+    const igMedia = graphGet(
+      `${igAccountId}/media?fields=id,caption,permalink,timestamp,comments.limit(10){id,text,username,timestamp}&limit=5`
+    );
+    if (igMedia && igMedia.data) {
+      igMedia.data.forEach(media => {
+        const comments = (media.comments && media.comments.data) || [];
+        comments.forEach(c => {
+          const cTime = new Date(c.timestamp);
+          if (cTime < oneDayAgo) return;
+          const postSnippet = media.caption
+            ? (media.caption.length > 40 ? media.caption.substring(0, 40) + "..." : media.caption)
+            : "Post";
+          recentComments.push({
+            type: "comment",
+            platform: "Instagram",
+            author: c.username || "Unknown",
+            text: c.text.length > 80 ? c.text.substring(0, 80) + "..." : c.text,
+            time: c.timestamp,
+            postSnippet,
+            url: media.permalink || `https://business.facebook.com/latest/inbox/all?asset_id=${pageId}`,
+          });
+        });
+      });
+    }
+
+    // ─── Step 6: Instagram Mentions / Tags (last 24h) ───
+    const mentionData = graphGet(
+      `${igAccountId}/tags?fields=id,caption,permalink,timestamp,username&limit=10`
+    );
+    if (mentionData && mentionData.data) {
+      mentionData.data.forEach(m => {
+        const mTime = new Date(m.timestamp);
+        if (mTime < oneDayAgo) return;
+        recentComments.push({
+          type: "mention",
+          platform: "Instagram",
+          author: m.username || "Unknown",
+          text: m.caption
+            ? (m.caption.length > 80 ? m.caption.substring(0, 80) + "..." : m.caption)
+            : "Tagged Deako",
+          time: m.timestamp,
+          postSnippet: "Mention",
+          url: m.permalink || `https://business.facebook.com/latest/inbox/all?asset_id=${pageId}`,
+        });
+      });
+    }
+  }
+
+  // Sort comments: newest first
+  recentComments.sort((a, b) => new Date(b.time) - new Date(a.time));
+
+  // ─── Step 7: Token expiry check ───
+  let tokenWarning = null;
+  try {
+    const debugData = graphGet(`debug_token?input_token=${pageToken}`);
+    if (debugData && debugData.data && debugData.data.expires_at) {
+      const expiresAt = new Date(debugData.data.expires_at * 1000);
+      const daysLeft = Math.floor((expiresAt - new Date()) / (1000 * 60 * 60 * 24));
+      if (daysLeft <= 7) {
+        tokenWarning = `Meta token expires in ${daysLeft} day${daysLeft !== 1 ? "s" : ""}!`;
+      }
+    }
+  } catch (e) {
+    Logger.log("Token debug check failed: " + e.toString());
+  }
+
+  return {
+    unreadDMs: totalUnread,
+    totalConversations: allConversations.length,
+    recentConversations: allConversations.slice(0, 10),
+    recentComments: recentComments.slice(0, 8), // top 8 for dashboard
+    tokenWarning,
+    error: null,
+  };
 }
 
 // --- READ SMS ACTIVITY FOR DASHBOARD ---
