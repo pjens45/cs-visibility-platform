@@ -72,6 +72,7 @@ A single Google Apps Script file that pulls from all four APIs and renders a con
 | `NICEREPLY_TOKEN` | `your_email:your_nicereply_api_key` |
 | `META_PAGE_TOKEN` | `your_meta_page_access_token` |
 | `META_PAGE_ID` | `your_facebook_page_id` |
+| `META_IG_TOKEN` | `your_instagram_login_access_token` (optional — for IG DMs) |
 
 5. Select `initializeSheet` from the function dropdown, click **Run**
 6. Select `setupTrigger` from the function dropdown, click **Run**
@@ -102,6 +103,20 @@ SLA thresholds default to sensible values but can be overridden per-deployment:
 3. Generate a Page Access Token with permissions: `pages_messaging`, `pages_read_engagement`, `instagram_basic`, `instagram_manage_messages`, `instagram_manage_comments`, `business_management`
 4. Extend to a long-lived token (60-day expiry) via the Access Token Debugger
 5. The script auto-discovers your Instagram Business Account ID from the linked Page
+
+#### Instagram DMs (optional)
+
+Instagram DMs require a separate token from the Instagram Login OAuth flow:
+
+1. In your Meta App, go to **Instagram API > API setup with Instagram login**
+2. Add the permissions: `instagram_business_basic`, `instagram_business_manage_messages`, `instagram_business_manage_comments`
+3. Add your Instagram account as an **Instagram Tester** under **App roles** and accept the invitation from Instagram Settings > Website permissions
+4. Set up **Business Login** with a redirect URI (e.g., `https://localhost/`)
+5. Visit the OAuth URL: `https://www.instagram.com/oauth/authorize?client_id={IG_APP_ID}&redirect_uri=https://localhost/&response_type=code&scope=instagram_business_basic,instagram_business_manage_messages,instagram_business_manage_comments`
+6. Authorize the app, capture the `code` parameter from the redirect URL
+7. Exchange for a short-lived token: `POST https://api.instagram.com/oauth/access_token` with `client_id`, `client_secret`, `grant_type=authorization_code`, `redirect_uri`, `code`
+8. Exchange for a long-lived token (60 days): `GET https://graph.instagram.com/access_token?grant_type=ig_exchange_token&client_secret={SECRET}&access_token={SHORT_TOKEN}`
+9. Add the long-lived token as `META_IG_TOKEN` in Script Properties
 
 ## Configuration
 
@@ -143,7 +158,7 @@ The dashboard uses a three-column layout — Email (left), Phone (center), Socia
 
 ## Known limitations
 
-- **Instagram DMs**: The Graph API endpoint for Instagram conversations requires the `instagram_business_manage_messages` permission, which is only available through the Instagram Login OAuth flow — not the Facebook Login flow used by Graph API Explorer tokens. As a result, IG DMs are not currently fetched. Messenger DMs, IG post comments, and IG mentions all work as expected.
+- **Instagram DMs**: Requires a separate Instagram Login access token (`META_IG_TOKEN`) with the `instagram_business_manage_messages` permission. This token is obtained through the Instagram Login OAuth flow — not the Facebook Login flow used for the Page token. If `META_IG_TOKEN` is not set, the script falls back to the Page token (which typically returns empty for IG DMs). The IG token is long-lived (60 days) and must be refreshed before expiry; the dashboard warns at 7 days remaining.
 - **Missed call customer info**: Aircall's API does not expose contact details for certain missed call scenarios. The dashboard shows "Check Aircall #[call ID]" with a link to the call record instead.
 
 ## Security

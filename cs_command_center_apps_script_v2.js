@@ -15,6 +15,7 @@
 //      AIRCALL_API_ID    = your_aircall_api_id
 //      AIRCALL_API_TOKEN = your_aircall_api_token
 //      NICEREPLY_TOKEN   = your_email:your_nicereply_api_key (or just the key)
+//      META_IG_TOKEN     = your_instagram_login_access_token (for IG DMs — see README)
 // 5. Select initializeSheet from dropdown, click Run
 // 6. Select setupTrigger from dropdown, click Run
 // ============================================================
@@ -39,7 +40,7 @@ const CONFIG = {
   // Agents who use Zendesk but are NOT on the support team — exclude from all dashboard stats
   excludeAgents: ["Excluded"],
   // Aircall lines to exclude from SMS activity tracking
-  excludeSMSLines: ["nonpro sales (post close)", "Agent D", "Agent E", "Agent F", "Agent G", "Agent H", "Agent I", "Agent J", "Agent K", "Agent L"],
+  excludeSMSLines: ["nonpro sales (post close)", "Agent D", "Agent E", "Agent F", "Agent G", "Agent H", "Agent I", "Agent J", "Agent K", "Agent L", "Agent M"],
   // Business hours for phone metrics (calls outside these hours excluded from answer rate)
   businessHours: {
     timezone: "America/Los_Angeles",  // Pacific
@@ -1901,14 +1902,16 @@ function _writeDashboardContent(ss, dash, zendesk, aircall, csat, postCall, sms,
         const dirColor = isOut ? BRAND.airBlueDark : green;
 
         // Row 1: direction, agent/contact info, time
+        // Strip leading apostrophe from phone (stored that way in SMS Log to prevent formula interpretation)
+        const safePhone = m.phone ? m.phone.replace(/^'/, "") : "";
         let description = "";
         if (isOut) {
           const agentShort = m.agent ? m.agent.split(" ")[0] : "?";
-          const contactStr = m.contact || m.phone || "Unknown";
+          const contactStr = m.contact || safePhone || "Unknown";
           description = `${agentShort} → ${contactStr}`;
           if (m.lineName) description += ` via ${m.lineName}`;
         } else {
-          const contactStr = m.contact || m.phone || "Unknown";
+          const contactStr = m.contact || safePhone || "Unknown";
           description = `${contactStr}`;
           if (m.lineName) description += ` → ${m.lineName}`;
         }
@@ -1916,7 +1919,7 @@ function _writeDashboardContent(ss, dash, zendesk, aircall, csat, postCall, sms,
         dash.setRowHeight(paRow, 20);
         dash.getRange(`I${paRow}`).setValue(dirIcon)
           .setFontSize(9).setFontColor(dirColor).setFontWeight("bold").setBackground(cardBg);
-        dash.getRange(`J${paRow}:M${paRow}`).merge().setValue(description)
+        dash.getRange(`J${paRow}:M${paRow}`).merge().setNumberFormat("@").setValue(description)
           .setFontSize(9).setBackground(cardBg);
         dash.getRange(`N${paRow}`).setValue(m.timeStr)
           .setFontSize(9).setBackground(cardBg).setHorizontalAlignment("right");
@@ -2181,7 +2184,7 @@ function _writeDashboardContent(ss, dash, zendesk, aircall, csat, postCall, sms,
     + `Open tickets exclude ${(CONFIG.excludeAgents || []).join(", ")} (not on CS team)`,
     `Social: FB = Facebook Messenger, IG = Instagram DM  ·  Comments & Mentions show last 24h from FB + IG posts  ·  `
     + `Amber highlight = unread DM or @mention  ·  Meta token expiry warning appears at 7 days`,
-    `API limitations: IG DMs not available (requires OAuth flow not supported by Graph API Explorer)  ·  `
+    `API notes: IG DMs powered by Meta webhooks → IG DM Log sheet  ·  `
     + `Missed call customer info shows "Check Aircall #" when contact data is not exposed in the API payload`,
   ];
   for (let li = 0; li < legendLines.length; li++) {
@@ -2412,9 +2415,15 @@ function doPost(e) {
   try {
     const ss = SpreadsheetApp.openById("1db-1Zlny6ryoAYc4CCkjXPtgXyGCGBEgWBfg5xnq7rU");
     const payload = JSON.parse(e.postData.contents);
-    const event = payload.event || "";
 
-    // Route based on event type
+    // Route based on payload shape:
+    //   Meta webhooks use { object: "instagram", entry: [...] }
+    //   Aircall webhooks use { event: "message.received", data: {...} }
+    if (payload.object === "instagram" || payload.object === "page") {
+      return handleInstagramDM(ss, payload);
+    }
+
+    const event = payload.event || "";
     if (event.startsWith("message.") || event.startsWith("group_message.")) {
       return handleAircallSMS(ss, payload);
     } else {
@@ -2425,6 +2434,112 @@ function doPost(e) {
     return ContentService.createTextOutput(JSON.stringify({ status: "error", message: err.toString() }))
       .setMimeType(ContentService.MimeType.JSON);
   }
+}
+
+// --- INSTAGRAM DM WEBHOOK HANDLER ---
+// Meta sends Instagram webhooks in TWO possible formats:
+//   Format A (changes): { object: "instagram", entry: [{ id, time, changes: [{ field: "messages", value: { sender, recipient, timestamp, message } }] }] }
+//   Format B (messaging): { object: "instagram", entry: [{ id, time, messaging: [{ sender, recipient, timestamp, message }] }] }
+// We handle both.
+function handleInstagramDM(ss, payload) {
+  const timestamp = new Date();
+
+  // Log raw payload to debug sheet
+  const debugSheet = getOrCreateSheet(ss, "IG DM Debug");
+  const debugRow = Math.min(debugSheet.getLastRow() + 1, 50);
+  debugSheet.getRange(debugRow, 1).setValue(timestamp);
+  debugSheet.getRange(debugRow, 2).setValue(JSON.stringify(payload).substring(0, 50000));
+
+  const igSheet = getOrCreateSheet(ss, "IG DM Log");
+
+  // Ensure headers exist
+  if (igSheet.getLastRow() === 0) {
+    igSheet.appendRow(["Timestamp", "Sender ID", "Sender Name", "Recipient ID", "Message", "Message ID", "Is Echo", "Direction"]);
+    igSheet.getRange("1:1").setFontWeight("bold").setBackground(BRAND.beigeLight);
+  }
+
+  // Our IG-scoped user ID — messages FROM this ID are outbound (agent replies)
+  const props = PropertiesService.getScriptProperties();
+  const ourIgId = props.getProperty("META_IG_USER_ID") || "";
+
+  const entries = payload.entry || [];
+  let rowsAdded = 0;
+
+  // Helper: process a single message event object (same shape from both formats)
+  function processMessage(evt) {
+    const senderId = (evt.sender && evt.sender.id) || "";
+    const recipientId = (evt.recipient && evt.recipient.id) || "";
+    const message = evt.message || {};
+    const messageId = message.mid || "";
+    const messageText = message.text || "";
+    const isEcho = message.is_echo || false;
+
+    // Also detect outbound by checking if sender matches our IG user ID
+    const isOutbound = isEcho || (ourIgId && senderId === ourIgId);
+    const direction = isOutbound ? "outbound" : "inbound";
+
+    const senderName = isOutbound ? "Deako" : senderId;
+
+    // Deduplicate by message ID
+    if (messageId && igSheet.getLastRow() > 1) {
+      const existingMids = igSheet.getRange(2, 6, igSheet.getLastRow() - 1, 1).getValues();
+      for (let i = 0; i < existingMids.length; i++) {
+        if (String(existingMids[i][0]) === String(messageId)) {
+          return; // skip duplicate
+        }
+      }
+    }
+
+    // Try to resolve sender name from IG profile (only for inbound / customer messages)
+    let resolvedName = senderName;
+    if (!isOutbound && senderId) {
+      const igToken = props.getProperty("META_IG_TOKEN");
+      if (igToken) {
+        try {
+          const profileUrl = `https://graph.instagram.com/v25.0/${senderId}?fields=name,username&access_token=${igToken}`;
+          const resp = UrlFetchApp.fetch(profileUrl, { muteHttpExceptions: true });
+          if (resp.getResponseCode() === 200) {
+            const profile = JSON.parse(resp.getContentText());
+            resolvedName = profile.username || profile.name || senderId;
+          }
+        } catch (e) {
+          Logger.log("IG profile lookup failed for " + senderId + ": " + e.toString());
+        }
+      }
+    }
+
+    igSheet.appendRow([
+      timestamp, senderId, resolvedName, recipientId,
+      messageText, messageId, isOutbound, direction
+    ]);
+    rowsAdded++;
+  }
+
+  entries.forEach(entry => {
+    // Format A: entry.changes[] (Instagram webhook standard format)
+    const changes = entry.changes || [];
+    changes.forEach(change => {
+      if (change.field === "messages" && change.value) {
+        processMessage(change.value);
+      }
+    });
+
+    // Format B: entry.messaging[] (Messenger-style format, may also be used)
+    const messagingEvents = entry.messaging || [];
+    messagingEvents.forEach(evt => {
+      processMessage(evt);
+    });
+  });
+
+  // Keep log manageable — trim to last 500 rows
+  const totalRows = igSheet.getLastRow();
+  if (totalRows > 501) {
+    igSheet.deleteRows(2, totalRows - 501);
+  }
+
+  Logger.log("IG DM webhook processed: " + rowsAdded + " messages logged");
+  return ContentService.createTextOutput(JSON.stringify({ status: "ok", messages_logged: rowsAdded }))
+    .setMimeType(ContentService.MimeType.JSON);
 }
 
 // --- AIRCALL SMS WEBHOOK HANDLER ---
@@ -2450,7 +2565,8 @@ function handleAircallSMS(ss, payload) {
   const contactFirst = (d.contact && d.contact.first_name) || "";
   const contactLast = (d.contact && d.contact.last_name) || "";
   const contactName = (contactFirst + " " + contactLast).trim() || "";
-  const contactPhone = d.external_number || "";
+  const contactPhoneRaw = d.external_number || "";
+  const contactPhone = contactPhoneRaw ? "'" + contactPhoneRaw : "";  // apostrophe prefix prevents Sheets formula interpretation
   const contactEmail = (d.contact && d.contact.emails
     && d.contact.emails[0] && d.contact.emails[0].value) || "";
 
@@ -2460,7 +2576,8 @@ function handleAircallSMS(ss, payload) {
 
   // Aircall line info: data.number.name / digits
   const lineName = (d.number && d.number.name) || "";
-  const lineNumber = (d.number && d.number.digits) || "";
+  const lineNumberRaw = (d.number && d.number.digits) || "";
+  const lineNumber = lineNumberRaw ? "'" + lineNumberRaw : "";  // apostrophe prevents Sheets formula interpretation
 
   const smsSheet = getOrCreateSheet(ss, "SMS Log");
 
@@ -2555,9 +2672,27 @@ function handlePostCallWebhook(ss, payload) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
-// Also handle GET (PostCall may ping the URL to verify)
+// Handle GET — serves two purposes:
+// 1. PostCall may ping the URL to verify
+// 2. Meta webhook verification: GET with hub.mode=subscribe, hub.verify_token, hub.challenge
 function doGet(e) {
-  return ContentService.createTextOutput(JSON.stringify({ status: "ok", service: "CS Command Center PostCall Webhook" }))
+  const params = e && e.parameter ? e.parameter : {};
+
+  // Meta webhook verification challenge
+  if (params["hub.mode"] === "subscribe" && params["hub.verify_token"]) {
+    const props = PropertiesService.getScriptProperties();
+    const expectedToken = props.getProperty("META_WEBHOOK_VERIFY_TOKEN") || "";
+    if (params["hub.verify_token"] === expectedToken) {
+      // Return the challenge value as plain text (Meta requires this exact format)
+      return ContentService.createTextOutput(params["hub.challenge"]);
+    } else {
+      Logger.log("Meta webhook verify failed — token mismatch");
+      return ContentService.createTextOutput("Forbidden").setMimeType(ContentService.MimeType.TEXT);
+    }
+  }
+
+  // Default response for PostCall or other pings
+  return ContentService.createTextOutput(JSON.stringify({ status: "ok", service: "CS Command Center Webhook" }))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -3335,11 +3470,81 @@ function fetchMetaStatus() {
   );
   const messengerConvos = parseConversations(messengerData, "Messenger");
 
-  // ─── Step 2: Instagram DMs (same endpoint, platform filter) ───
-  const igDMData = graphGet(
-    `${pageId}/conversations?platform=instagram&fields=id,updated_time,unread_count,participants,messages.limit(1){message,from,created_time}&limit=15`
-  );
-  const igConvos = parseConversations(igDMData, "Instagram");
+  // ─── Step 2: Instagram DMs (from webhook log sheet) ───
+  // IG DMs come in via Meta webhooks → doPost() → handleInstagramDM() → "IG DM Log" sheet.
+  // We read the sheet and group messages into conversations by sender.
+  let igConvos = [];
+  const igToken = props.getProperty("META_IG_TOKEN");
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  try {
+    const igSheet = ss.getSheetByName("IG DM Log");
+    if (igSheet && igSheet.getLastRow() > 1) {
+      // Columns: Timestamp(1), Sender ID(2), Sender Name(3), Recipient ID(4), Message(5), Message ID(6), Is Echo(7), Direction(8)
+      const igData = igSheet.getRange(2, 1, igSheet.getLastRow() - 1, 8).getValues();
+
+      // Group by sender into conversations (keyed by sender ID for inbound, recipient for outbound)
+      const convoMap = {};  // senderId → { messages: [...], senderName }
+      igData.forEach(row => {
+        const ts = row[0] instanceof Date ? row[0] : new Date(row[0]);
+        const senderId = String(row[1] || "");
+        const senderName = String(row[2] || "Unknown");
+        const msgText = String(row[4] || "");
+        const isEcho = row[6] === true || row[6] === "TRUE" || row[6] === "true";
+        const direction = String(row[7] || "");
+
+        // Key the conversation by the customer's ID (senderId for inbound, recipientId for outbound)
+        const customerId = isEcho ? String(row[3] || "") : senderId;
+        const customerName = isEcho ? "customer" : senderName;
+
+        if (!customerId) return;
+
+        if (!convoMap[customerId]) {
+          convoMap[customerId] = { customerName: "Unknown", messages: [] };
+        }
+        // Update customer name if this is an inbound message (customer sent it)
+        if (!isEcho && senderName !== senderId) {
+          convoMap[customerId].customerName = senderName;
+        }
+        convoMap[customerId].messages.push({
+          text: msgText, time: ts, isEcho, direction
+        });
+      });
+
+      // Convert to conversation objects matching the same shape as Messenger convos
+      const inboxUrl = `https://business.facebook.com/latest/inbox/all?asset_id=${pageId}`;
+      Object.keys(convoMap).forEach(customerId => {
+        const convo = convoMap[customerId];
+        // Sort messages newest first
+        convo.messages.sort((a, b) => b.time - a.time);
+        const latest = convo.messages[0];
+        const latestTime = latest.time;
+
+        // Only include if last activity was within 24h
+        if (latestTime < oneDayAgo) return;
+
+        // Determine unread: if the latest message is from the customer (not echo), it's "unread"
+        const isUnread = !latest.isEcho;
+        const customerName = convo.customerName !== "Unknown" ? convo.customerName : ("IG User " + customerId.substring(0, 6));
+
+        const msgText = latest.text || "";
+        igConvos.push({
+          id: "ig_webhook_" + customerId,
+          customerName,
+          unread: isUnread ? 1 : 0,
+          lastMessage: msgText.length > 80 ? msgText.substring(0, 80) + "..." : msgText,
+          lastMessageFrom: latest.isEcho ? "Deako" : customerName.split(" ")[0],
+          time: latestTime.toISOString(),
+          inboxUrl,
+          platform: "Instagram",
+        });
+      });
+      Logger.log("IG DMs from webhook log: " + igConvos.length + " active conversations");
+    } else {
+      Logger.log("IG DM Log sheet empty or missing — no IG DM data");
+    }
+  } catch (e) {
+    Logger.log("Error reading IG DM Log sheet: " + e.toString());
+  }
 
   // Merge conversations, deduplicate by id, filter to actionable items only:
   //   - Within last 24h (recent activity), OR
@@ -3461,17 +3666,35 @@ function fetchMetaStatus() {
 
   // ─── Step 7: Token expiry check ───
   let tokenWarning = null;
+  // Check Page token expiry
   try {
     const debugData = graphGet(`debug_token?input_token=${pageToken}`);
     if (debugData && debugData.data && debugData.data.expires_at) {
       const expiresAt = new Date(debugData.data.expires_at * 1000);
       const daysLeft = Math.floor((expiresAt - new Date()) / (1000 * 60 * 60 * 24));
       if (daysLeft <= 7) {
-        tokenWarning = `Meta token expires in ${daysLeft} day${daysLeft !== 1 ? "s" : ""}!`;
+        tokenWarning = `Meta Page token expires in ${daysLeft} day${daysLeft !== 1 ? "s" : ""}!`;
       }
     }
   } catch (e) {
-    Logger.log("Token debug check failed: " + e.toString());
+    Logger.log("Page token debug check failed: " + e.toString());
+  }
+  // Check IG token expiry (uses graph.instagram.com, separate long-lived token)
+  if (igToken && !tokenWarning) {
+    try {
+      const igRefreshUrl = `https://graph.instagram.com/refresh_access_token?grant_type=ig_refresh_token&access_token=${igToken}`;
+      // We don't actually refresh here — just checking via token debug on graph.facebook.com
+      const igDebug = graphGet(`debug_token?input_token=${igToken}`);
+      if (igDebug && igDebug.data && igDebug.data.expires_at) {
+        const expiresAt = new Date(igDebug.data.expires_at * 1000);
+        const daysLeft = Math.floor((expiresAt - new Date()) / (1000 * 60 * 60 * 24));
+        if (daysLeft <= 7) {
+          tokenWarning = `IG token expires in ${daysLeft} day${daysLeft !== 1 ? "s" : ""}! Refresh via: /refresh_access_token`;
+        }
+      }
+    } catch (e) {
+      Logger.log("IG token debug check failed: " + e.toString());
+    }
   }
 
   return {
@@ -3566,6 +3789,49 @@ function readSMSActivity() {
 }
 
 // --- HELPER FUNCTIONS ---
+
+// --- ONE-TIME CLEANUP: Fix #ERROR! phone numbers in SMS Log ---
+// Run this once from the Apps Script editor to fix historical phone number cells
+// that Sheets interpreted as formulas. Safe to run multiple times.
+function fixSMSLogPhoneErrors() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName("SMS Log");
+  if (!sheet || sheet.getLastRow() <= 1) {
+    Logger.log("SMS Log empty or missing — nothing to fix");
+    return;
+  }
+
+  const lastRow = sheet.getLastRow();
+  // Column F (6) = Contact Phone, Column K (11) = Line Number
+  const colsToFix = [6, 11];
+  let fixed = 0;
+
+  colsToFix.forEach(col => {
+    const range = sheet.getRange(2, col, lastRow - 1, 1);
+    // Set entire column to plain text first
+    range.setNumberFormat("@");
+    const formulas = sheet.getRange(2, col, lastRow - 1, 1).getFormulas();
+    const values = sheet.getRange(2, col, lastRow - 1, 1).getValues();
+
+    for (let i = 0; i < formulas.length; i++) {
+      const formula = formulas[i][0];
+      const value = values[i][0];
+      // If cell has a formula (Sheets misinterpreted +number as formula) or shows error
+      if (formula) {
+        // The formula IS the original value Sheets tried to evaluate (e.g., "+14155551234")
+        const originalValue = formula.startsWith("=") ? formula.substring(1) : formula;
+        sheet.getRange(i + 2, col).setValue("'" + originalValue);
+        fixed++;
+      } else if (String(value).includes("#ERROR") || String(value).includes("#REF") || String(value).includes("#VALUE")) {
+        // Can't recover the original — mark it
+        sheet.getRange(i + 2, col).setValue("(phone error — check Aircall)");
+        fixed++;
+      }
+    }
+  });
+
+  Logger.log("Fixed " + fixed + " phone number cells in SMS Log");
+}
 
 function getOrCreateSheet(ss, name) {
   let sheet = ss.getSheetByName(name);
