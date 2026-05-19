@@ -131,6 +131,118 @@ const BRAND = {
   roseQuartzLight:"#D6BDC8",
 };
 
+// --- CUSTOM MENU ---
+function onOpen() {
+  SpreadsheetApp.getUi().createMenu("CS Command Center")
+    .addItem("Hide IG Sender (filter spam)", "hideIGSender")
+    .addItem("View Hidden IG Senders", "viewHiddenSenders")
+    .addToUi();
+}
+
+// Hide an IG sender from the dashboard — prompts for username, removes their messages
+// from IG DM Log, adds them to "Hidden IG Senders" sheet so future webhooks are filtered.
+// NOTE: This does NOT block them on Instagram — it only hides them from the CS dashboard.
+function hideIGSender() {
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const igSheet = ss.getSheetByName("IG DM Log");
+
+  if (!igSheet || igSheet.getLastRow() <= 1) {
+    ui.alert("No IG DM Log data found.");
+    return;
+  }
+
+  // Build list of unique senders with their latest message preview
+  const data = igSheet.getRange(2, 1, igSheet.getLastRow() - 1, 8).getValues();
+  const senders = {};
+  data.forEach(row => {
+    const direction = String(row[7] || "");
+    if (direction !== "inbound") return;
+    const name = String(row[2] || "Unknown");
+    const senderId = String(row[1] || "");
+    const msg = String(row[4] || "");
+    if (!senders[senderId]) {
+      senders[senderId] = { name, msg: msg.substring(0, 60), count: 0 };
+    }
+    senders[senderId].count++;
+  });
+
+  if (Object.keys(senders).length === 0) {
+    ui.alert("No inbound IG DM senders found.");
+    return;
+  }
+
+  // Build prompt with sender list
+  let prompt = "Enter the username or sender ID to hide from the dashboard:\n\nRecent senders:\n";
+  Object.keys(senders).forEach(id => {
+    const s = senders[id];
+    prompt += `  ${s.name} (${s.count} msgs) — "${s.msg}..."\n`;
+  });
+
+  const response = ui.prompt("Hide IG Sender", prompt, ui.ButtonSet.OK_CANCEL);
+  if (response.getSelectedButton() !== ui.Button.OK) return;
+
+  const input = response.getResponseText().trim().toLowerCase();
+  if (!input) return;
+
+  // Find matching sender by username or ID
+  let matchedId = null;
+  let matchedName = null;
+  Object.keys(senders).forEach(id => {
+    if (id.toLowerCase() === input || senders[id].name.toLowerCase() === input) {
+      matchedId = id;
+      matchedName = senders[id].name;
+    }
+  });
+
+  if (!matchedId) {
+    ui.alert("No sender found matching '" + input + "'. Try the exact username from the IG DM Log sheet.");
+    return;
+  }
+
+  // Add to hidden senders sheet
+  const hiddenSheet = getOrCreateSheet(ss, "Hidden IG Senders");
+  if (hiddenSheet.getLastRow() === 0) {
+    hiddenSheet.appendRow(["Sender ID", "Username", "Hidden At", "Hidden By"]);
+    hiddenSheet.getRange("1:1").setFontWeight("bold");
+  }
+  hiddenSheet.appendRow([matchedId, matchedName, new Date(), Session.getActiveUser().getEmail()]);
+
+  // Remove their messages from IG DM Log (iterate backwards to avoid index shift)
+  let removed = 0;
+  for (let i = igSheet.getLastRow(); i >= 2; i--) {
+    const rowSenderId = String(igSheet.getRange(i, 2).getValue());
+    if (rowSenderId === matchedId) {
+      igSheet.deleteRow(i);
+      removed++;
+    }
+  }
+
+  ui.alert("Hidden " + matchedName + " (" + matchedId + ") from the CS dashboard.\nRemoved " + removed + " messages from IG DM Log.\nFuture messages from this sender won't appear on the dashboard.\n\nNote: They are NOT blocked on Instagram — you can still see their DMs in Meta Business Suite.");
+}
+
+function viewHiddenSenders() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName("Hidden IG Senders");
+  if (!sheet || sheet.getLastRow() <= 1) {
+    SpreadsheetApp.getUi().alert("No hidden senders yet. Use 'Hide IG Sender' from the menu to filter one.");
+    return;
+  }
+  ss.setActiveSheet(sheet);
+}
+
+// Helper: get set of hidden IG sender IDs (filtered from dashboard + webhooks)
+function getHiddenIGSenders(ssOverride) {
+  const ss = ssOverride || SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName("Hidden IG Senders");
+  const hidden = new Set();
+  if (sheet && sheet.getLastRow() > 1) {
+    const ids = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues();
+    ids.forEach(row => { if (row[0]) hidden.add(String(row[0])); });
+  }
+  return hidden;
+}
+
 // --- MAIN REFRESH FUNCTION ---
 function refreshDashboard() {
   loadThresholds();  // read SLA targets from Script Properties (falls back to defaults)
@@ -393,6 +505,10 @@ function fetchZendeskStatus() {
     }
   });
 
+  // Count open voicemail tickets on support lines (pro + nonpro only, excludes Deako Main)
+  const openVoicemails = zendeskSearchCount('subject:"Voicemail on pro support" status<solved')
+    + zendeskSearchCount('subject:"Voicemail on nonpro support" status<solved');
+
   return {
     totalOpen,
     totalBreached,
@@ -403,6 +519,7 @@ function fetchZendeskStatus() {
     unassigned,
     openQueueCount,
     onHoldQueueCount,
+    openVoicemails,
     agentCounts,
     tickets: filtered,
     flaggedTickets,
@@ -412,10 +529,74 @@ function fetchZendeskStatus() {
   };
 }
 
-// Calculate business minutes between two dates (6a-5p Mon-Fri PST)
+// Parse DEAKO_HOLIDAYS Script Property into a Set of "YYYY-MM-DD" strings
+// Includes multi-day ranges (e.g. "12/28/2026-12/31/2026")
+function getDeakoHolidays() {
+  const props = PropertiesService.getScriptProperties();
+  const raw = props.getProperty("DEAKO_HOLIDAYS") || "";
+  const holidays = new Set();
+  if (!raw.trim()) return holidays;
+
+  raw.split(",").forEach(entry => {
+    entry = entry.trim();
+    if (!entry) return;
+
+    if (entry.includes("-") && entry.split("-").length >= 2) {
+      // Could be a date range like "12/28/2026-12/31/2026" or single date "2026-07-03"
+      // Detect range: if both sides parse as dates with month/day/year format
+      const parts = entry.split("-");
+      // Try MM/DD/YYYY-MM/DD/YYYY range format
+      if (parts.length >= 4) {
+        // Likely "MM/DD/YYYY-MM/DD/YYYY"
+        const startStr = parts.slice(0, 3).join("-");
+        const endStr = parts.slice(3).join("-");
+        const s = new Date(parts[0] + "/" + parts[1] + "/" + parts[2]);
+        const e = new Date(parts[3] + "/" + parts[4] + "/" + parts[5]);
+        if (!isNaN(s) && !isNaN(e)) {
+          for (let d = new Date(s); d <= e; d.setDate(d.getDate() + 1)) {
+            holidays.add(Utilities.formatDate(new Date(d), "America/Los_Angeles", "yyyy-MM-dd"));
+          }
+          return;
+        }
+      }
+      // Try YYYY-MM-DD single date
+      const singleDate = new Date(entry);
+      if (!isNaN(singleDate)) {
+        holidays.add(Utilities.formatDate(singleDate, "America/Los_Angeles", "yyyy-MM-dd"));
+        return;
+      }
+    }
+
+    // Single date: MM/DD/YYYY or YYYY-MM-DD
+    const d = new Date(entry);
+    if (!isNaN(d)) {
+      holidays.add(Utilities.formatDate(d, "America/Los_Angeles", "yyyy-MM-dd"));
+    }
+  });
+  return holidays;
+}
+
+// Check if a given date is a non-working day (weekend or Deako holiday)
+function isNonWorkingDay(date, holidays) {
+  const tz = CONFIG.businessHours.timezone;
+  const pacStr = date.toLocaleString("en-US", { timeZone: tz });
+  const pac = new Date(pacStr);
+  const dow = pac.getDay();  // 0=Sun, 6=Sat
+
+  // Weekend check
+  if (!CONFIG.businessHours.workDays.includes(dow)) return true;
+
+  // Holiday check
+  if (!holidays) holidays = getDeakoHolidays();
+  const dateKey = Utilities.formatDate(date, tz, "yyyy-MM-dd");
+  return holidays.has(dateKey);
+}
+
+// Calculate business minutes between two dates (6a-5p Mon-Fri PST, excluding holidays)
 function calcBusinessMinutes(start, end) {
   const bh = CONFIG.businessHours;
   const minPerDay = (bh.endHour - bh.startHour) * 60; // 660 min for 6a-5p
+  const holidays = getDeakoHolidays();
 
   let totalMin = 0;
   let cursor = new Date(start);
@@ -432,7 +613,9 @@ function calcBusinessMinutes(start, end) {
     const hour = pac.getHours();
     const min = pac.getMinutes();
 
-    if (bh.workDays.includes(dow)) {
+    // Skip holidays (treat like weekends)
+    const dateKey = Utilities.formatDate(cursor, bh.timezone, "yyyy-MM-dd");
+    if (bh.workDays.includes(dow) && !holidays.has(dateKey)) {
       // It's a workday
       const startMin = bh.startHour * 60;
       const endMin = bh.endHour * 60;
@@ -522,8 +705,9 @@ function fetchAircallStatus() {
   });
   const inboundCalls = supportCalls.filter(c => c.direction === "inbound");
 
-  // Filter to business hours only (6am-5pm Mon-Fri Pacific)
+  // Filter to business hours only (6am-5pm Mon-Fri Pacific, excluding Deako holidays)
   const bh = CONFIG.businessHours;
+  const holidays = getDeakoHolidays();
   const bizHourCalls = inboundCalls.filter(c => {
     if (!c.started_at) return false;
     // Convert Unix timestamp to Pacific time
@@ -532,7 +716,8 @@ function fetchAircallStatus() {
     const pacificDate = new Date(pacificStr);
     const dayOfWeek = pacificDate.getDay(); // 0=Sun, 1=Mon ... 6=Sat
     const hour = pacificDate.getHours();
-    return bh.workDays.includes(dayOfWeek) && hour >= bh.startHour && hour < bh.endHour;
+    const dateKey = Utilities.formatDate(callDate, bh.timezone, "yyyy-MM-dd");
+    return bh.workDays.includes(dayOfWeek) && !holidays.has(dateKey) && hour >= bh.startHour && hour < bh.endHour;
   });
 
   // Also track after-hours calls separately for context
@@ -1258,18 +1443,28 @@ function _writeDashboardContent(ss, dash, zendesk, aircall, csat, postCall, sms,
   const k4 = 7 + alertOffset;
   dash.setRowHeight(k4, 16);
 
-  // Open label always shows SAS sub-count
+  // Open label shows SAS sub-count and voicemail count
   const sasColor = zendesk.sasTickets > 0 ? amber : navy;
-  const sasLabel = `Open · ${zendesk.sasTickets} New SAS`;
+  const vmCount = zendesk.openVoicemails || 0;
+  const vmColor = vmCount > 0 ? amber : navy;
+  const sasPart = ` · ${zendesk.sasTickets} New SAS`;
+  const vmPart = vmCount > 0 ? ` · ${vmCount} VM` : "";
+  const sasLabel = `Open${sasPart}${vmPart}`;
+  const sasPartStart = 4;  // after "Open"
+  const sasPartEnd = sasPartStart + sasPart.length;
+  const vmPartStart = sasPartEnd;
+  const vmPartEnd = vmPartStart + vmPart.length;
+
+  const rtBuilder = SpreadsheetApp.newRichTextValue()
+    .setText(sasLabel)
+    .setTextStyle(0, 4, SpreadsheetApp.newTextStyle().setFontSize(8).setForegroundColor(navy).build())
+    .setTextStyle(sasPartStart, sasPartEnd, SpreadsheetApp.newTextStyle().setFontSize(8).setForegroundColor(sasColor).build());
+  if (vmPart) {
+    rtBuilder.setTextStyle(vmPartStart, vmPartEnd, SpreadsheetApp.newTextStyle().setFontSize(8).setForegroundColor(vmColor).build());
+  }
   dash.getRange(`A${k4}:B${k4}`).merge().setBackground(cardBg)
-    .setRichTextValue(
-      SpreadsheetApp.newRichTextValue()
-        .setText(sasLabel)
-        .setTextStyle(0, 4, SpreadsheetApp.newTextStyle().setFontSize(8).setForegroundColor(navy).build())
-        .setTextStyle(4, sasLabel.length,
-          SpreadsheetApp.newTextStyle().setFontSize(8).setForegroundColor(sasColor).build())
-        .build()
-    ).setVerticalAlignment("top");
+    .setRichTextValue(rtBuilder.build())
+    .setVerticalAlignment("top");
   dash.getRange(`C${k4}:D${k4}`).merge().setBackground(cardBg)
     .setValue("On Hold")
     .setFontSize(8).setFontColor(navy).setVerticalAlignment("top");
@@ -1951,7 +2146,12 @@ function _writeDashboardContent(ss, dash, zendesk, aircall, csat, postCall, sms,
   // ─── Social — Meta Business Suite (Messenger + Instagram) ───
   sRow++; // spacer to align with other sections
   dash.getRange(`Q${sRow}:X${sRow}`).merge()
-    .setValue("Social — Meta Business Suite")
+    .setRichTextValue(
+      SpreadsheetApp.newRichTextValue()
+        .setText("Social — Meta Business Suite")
+        .setLinkUrl("https://business.facebook.com/latest/inbox/all")
+        .build()
+    )
     .setBackground(navy).setFontColor("#FFFFFF")
     .setFontSize(11).setFontWeight("bold").setVerticalAlignment("middle");
   dash.setRowHeight(sRow, 26);
@@ -2020,11 +2220,11 @@ function _writeDashboardContent(ss, dash, zendesk, aircall, csat, postCall, sms,
     metaConversations.slice(0, 10).forEach((convo, cIdx) => {
       const rowBg = convo.unread > 0 ? amberLt : (cIdx % 2 === 1 ? altRow : cardBg);
 
-      // Row 1: Customer name (hyperlinked), platform badge, from, time
+      // Row 1: Customer name, platform badge, from, time
       dash.setRowHeight(sRow, 20);
       dash.getRange(`Q${sRow}`)
-        .setFormula(`=HYPERLINK("${convo.inboxUrl}","${convo.customerName.replace(/"/g, '""')}")`)
-        .setFontSize(9).setFontColor("#1155CC").setBackground(rowBg);
+        .setValue(convo.customerName)
+        .setFontSize(9).setFontWeight("bold").setFontColor(darkText).setBackground(rowBg);
       // Platform badge
       const platformShort = convo.platform === "Instagram" ? "IG" : "FB";
       const platformColor = convo.platform === "Instagram" ? "#C13584" : "#1877F2";
@@ -2168,7 +2368,7 @@ function _writeDashboardContent(ss, dash, zendesk, aircall, csat, postCall, sms,
 
   // Footer — version & goals
   dash.getRange(`A${lastRow}:X${lastRow}`).merge()
-    .setValue(`CS Command Center v1.5.0  ·  Refreshes every 5 min  ·  Goal: reply within ${slaHours} business hours · answer ${CONFIG.thresholds.phoneAnswerRate.green}%+ inbound calls · Mon–Fri 6a–5p PST`)
+    .setValue(`CS Command Center v1.7.0  ·  Refreshes every 5 min  ·  Goal: reply within ${slaHours} business hours · answer ${CONFIG.thresholds.phoneAnswerRate.green}%+ inbound calls · Mon–Fri 6a–5p PST`)
     .setFontColor(gray).setFontSize(8).setFontStyle("italic")
     .setHorizontalAlignment("center").setBackground(bg);
 
@@ -2465,6 +2665,26 @@ function handleInstagramDM(ss, payload) {
   const entries = payload.entry || [];
   let rowsAdded = 0;
 
+  // Load hidden senders (pass ss since we're in webhook context, not UI)
+  const hiddenSenders = getHiddenIGSenders(ss);
+
+  // Spam filter — messages matching these patterns are logged to debug but skipped from IG DM Log.
+  // Case-insensitive partial match. Add new patterns as spam evolves.
+  const SPAM_PATTERNS = [
+    "followers instantly",
+    "skyrocket your social",
+    "buy followers",
+    "10k-100k",
+    "shoutout for shoutout",
+    "get verified now",
+  ];
+
+  function isSpam(text) {
+    if (!text) return false;
+    const lower = text.toLowerCase();
+    return SPAM_PATTERNS.some(p => lower.includes(p));
+  }
+
   // Helper: process a single message event object (same shape from both formats)
   function processMessage(evt) {
     const senderId = (evt.sender && evt.sender.id) || "";
@@ -2473,6 +2693,18 @@ function handleInstagramDM(ss, payload) {
     const messageId = message.mid || "";
     const messageText = message.text || "";
     const isEcho = message.is_echo || false;
+
+    // Skip spam (inbound only — never filter our own outbound replies)
+    if (!isEcho && isSpam(messageText)) {
+      Logger.log("IG DM spam filtered: " + messageText.substring(0, 80));
+      return;
+    }
+
+    // Skip messages from hidden senders (inbound only)
+    if (!isEcho && hiddenSenders.has(senderId)) {
+      Logger.log("IG DM hidden sender skipped: " + senderId);
+      return;
+    }
 
     // Also detect outbound by checking if sender matches our IG user ID
     const isOutbound = isEcho || (ourIgId && senderId === ourIgId);
@@ -2525,9 +2757,14 @@ function handleInstagramDM(ss, payload) {
     });
 
     // Format B: entry.messaging[] (Messenger-style format, may also be used)
+    // Only process events that contain a message — skip read receipts, reactions, etc.
     const messagingEvents = entry.messaging || [];
     messagingEvents.forEach(evt => {
-      processMessage(evt);
+      if (evt.message) {
+        processMessage(evt);
+      } else {
+        Logger.log("IG webhook skipped non-message event: " + (evt.read ? "read_receipt" : evt.reaction ? "reaction" : "other"));
+      }
     });
   });
 
@@ -3476,6 +3713,7 @@ function fetchMetaStatus() {
   let igConvos = [];
   const igToken = props.getProperty("META_IG_TOKEN");
   const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const hiddenIGSenders = getHiddenIGSenders(ss);
   try {
     const igSheet = ss.getSheetByName("IG DM Log");
     if (igSheet && igSheet.getLastRow() > 1) {
@@ -3498,6 +3736,9 @@ function fetchMetaStatus() {
 
         if (!customerId) return;
 
+        // Skip hidden senders (filtered from dashboard, not blocked on IG)
+        if (hiddenIGSenders.has(customerId)) return;
+
         if (!convoMap[customerId]) {
           convoMap[customerId] = { customerName: "Unknown", messages: [] };
         }
@@ -3511,7 +3752,7 @@ function fetchMetaStatus() {
       });
 
       // Convert to conversation objects matching the same shape as Messenger convos
-      const inboxUrl = `https://business.facebook.com/latest/inbox/all?asset_id=${pageId}`;
+      const inboxUrl = `https://business.facebook.com/latest/inbox/instagram?asset_id=${pageId}`;
       Object.keys(convoMap).forEach(customerId => {
         const convo = convoMap[customerId];
         // Sort messages newest first
@@ -3786,6 +4027,468 @@ function readSMSActivity() {
     agentStats,
     messages: messages.slice(0, 10), // last 10 for display
   };
+}
+
+// --- DAILY RECAP EMAIL ---
+// Sends a formatted HTML email summarizing the day's CS metrics.
+// Recipients configured via RECAP_RECIPIENTS Script Property (comma-separated emails).
+// Schedule: run setupDailyRecapTrigger() once to set up the 6pm PST daily trigger.
+
+function sendDailyRecap() {
+  loadThresholds();
+  const props = PropertiesService.getScriptProperties();
+  const recipients = props.getProperty("RECAP_RECIPIENTS") || "";
+  if (!recipients) {
+    Logger.log("RECAP_RECIPIENTS not set — skipping daily recap");
+    return;
+  }
+
+  // Gather all data (same calls the dashboard uses)
+  const zendesk = fetchZendeskStatus();
+  const aircall = fetchAircallStatus();
+  const csat = fetchNicereplyCSAT();
+  const postCall = readPostCallCSAT();
+  const sms = readSMSActivity();
+  const meta = fetchMetaStatus();
+
+  const tz = CONFIG.businessHours.timezone;
+  const now = new Date();
+  const dateStr = Utilities.formatDate(now, tz, "EEEE, MMMM d, yyyy");
+
+  // ── Check if today is a non-working day (weekend or Deako holiday) ──
+  const holidays = getDeakoHolidays();
+  const nonWorkingDay = isNonWorkingDay(now, holidays);
+
+  if (nonWorkingDay) {
+    sendNonWorkingDaySnapshot(zendesk, meta, now, dateStr, tz, recipients);
+    return;
+  }
+
+  // ── Load previous day's snapshot for comparison ──
+  const prevJson = props.getProperty("RECAP_PREV_SNAPSHOT") || "{}";
+  let prev = {};
+  try { prev = JSON.parse(prevJson); } catch (e) { prev = {}; }
+
+  // Determine if we have previous data to show the Yesterday column
+  const hasPrev = prev.date ? true : false;
+
+  // Fixed column widths for consistent alignment across all tables
+  const colLabel = "width:50%;";
+  const colToday = "width:25%;text-align:right;";
+  const colYest = "width:25%;text-align:right;";
+
+  // Yesterday cell helper — returns a <td> for the yesterday column (or empty string if no prev data)
+  function prevTd(prevVal, unit) {
+    if (!hasPrev || prevVal === undefined || prevVal === null) return hasPrev ? `<td style="${colYest}color:#AAA;font-size:12px;">-</td>` : "";
+    const u = unit || "";
+    return `<td style="${colYest}color:#888;font-size:12px;">${prevVal}${u}</td>`;
+  }
+
+  // Table header row with Today / Yesterday columns
+  const compHeader = hasPrev
+    ? `<tr style="border-bottom:1px solid #E1DFDD;"><td style="${colLabel}"></td><td style="${colToday}font-size:11px;color:#888;padding-bottom:6px;font-weight:bold;">Today</td><td style="${colYest}font-size:11px;color:#888;padding-bottom:6px;font-weight:bold;">Yesterday</td></tr>`
+    : "";
+
+  // ── Health status calculations (must match dashboard logic exactly) ──
+  const th = CONFIG.thresholds;
+
+  // Email: >5 breached = At Risk, >0 = Watch, 0 = Healthy
+  const emailHealth = zendesk.totalBreached > 5 ? "red"
+    : zendesk.totalBreached > 0 ? "yellow" : "green";
+
+  // Phone: >= green threshold = Healthy, >= yellow = Watch, else At Risk
+  const phoneHealth = aircall.teamAnswerRate >= th.phoneAnswerRate.green ? "green"
+    : aircall.teamAnswerRate >= th.phoneAnswerRate.yellow ? "yellow" : "red";
+
+  // Social: uses computeSocialOldestWait() — same helper the dashboard uses
+  const metaConvos = meta.recentConversations || [];
+  const unreadConvos = metaConvos.filter(c => c.unread > 0);
+  const socialOldestWaitMin = computeSocialOldestWait(meta);
+  const socialHealth = socialOldestWaitMin <= th.socialResponseTime.green ? "green"
+    : socialOldestWaitMin <= th.socialResponseTime.yellow ? "yellow" : "red";
+
+  const healthColors = { green: "#2E7D32", yellow: "#F57F17", red: "#C62828" };
+  const healthLabels = { green: "Healthy", yellow: "Watch", red: "At Risk" };
+
+  function healthBadge(level) {
+    return `<span style="background:${healthColors[level]};color:#fff;padding:2px 10px;border-radius:10px;font-size:12px;font-weight:bold;">${healthLabels[level]}</span>`;
+  }
+
+  // ── Build HTML email ──
+  const navy = "#1B3747";
+  const cardBg = "#F8F7F6";
+  const borderColor = "#E1DFDD";
+  const answerRateRounded = Math.round(aircall.teamAnswerRate || 0);
+  const sasCount = (zendesk.sasTickets && zendesk.sasTickets.length) || 0;
+
+  let html = `
+  <div style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto;color:#1D1D1D;">
+    <div style="background:${navy};color:#fff;padding:16px 24px;border-radius:8px 8px 0 0;">
+      <h1 style="margin:0;font-size:20px;">CS Command Center — End of Day Summary</h1>
+      <p style="margin:4px 0 0;font-size:13px;color:#C3D3D7;">${dateStr}</p>
+    </div>
+
+    <div style="padding:20px 24px;background:#fff;border:1px solid ${borderColor};border-top:none;">
+
+      <!-- Health Status -->
+      <table style="width:100%;margin-bottom:20px;"><tr>
+        <td style="text-align:center;padding:8px;">
+          <div style="font-size:11px;color:#666;margin-bottom:4px;">EMAIL</div>${healthBadge(emailHealth)}
+        </td>
+        <td style="text-align:center;padding:8px;">
+          <div style="font-size:11px;color:#666;margin-bottom:4px;">PHONE</div>${healthBadge(phoneHealth)}
+        </td>
+        <td style="text-align:center;padding:8px;">
+          <div style="font-size:11px;color:#666;margin-bottom:4px;">SOCIAL</div>${healthBadge(socialHealth)}
+        </td>
+      </tr></table>`;
+
+  // ── EMAIL SECTION ──
+  html += `
+      <div style="background:${cardBg};border:1px solid ${borderColor};border-radius:6px;padding:16px;margin-bottom:16px;">
+        <h2 style="margin:0 0 12px;font-size:15px;color:${navy};">Email (Zendesk)</h2>
+        <table style="width:100%;font-size:13px;border-collapse:collapse;">
+          ${compHeader}
+          <tr><td style="${colLabel}padding:4px 0;">Open Tickets</td><td style="${colToday}font-weight:bold;">${zendesk.totalOpen}</td>${prevTd(prev.openTickets)}</tr>
+          <tr><td style="${colLabel}padding:4px 0;">On Hold</td><td style="${colToday}font-weight:bold;">${zendesk.onHoldQueueCount}</td>${prevTd(prev.onHold)}</tr>
+          <tr><td style="${colLabel}padding:4px 0;">Unassigned</td><td style="${colToday}font-weight:bold;">${zendesk.unassigned}</td>${prevTd(prev.unassigned)}</tr>
+          <tr><td style="${colLabel}padding:4px 0;">SAS Tickets</td><td style="${colToday}font-weight:bold;">${sasCount}</td>${prevTd(prev.sasTickets)}</tr>
+          <tr><td style="${colLabel}padding:4px 0;">Voicemails (Open)</td><td style="${colToday}font-weight:bold;">${zendesk.openVoicemails || 0}</td>${prevTd(prev.openVoicemails)}</tr>
+          <tr><td style="${colLabel}padding:4px 0;">Past SLA (${zendesk.slaHours}h)</td><td style="${colToday}font-weight:bold;color:${zendesk.totalBreached > 0 ? '#C62828' : '#2E7D32'};">${zendesk.totalBreached}</td>${prevTd(prev.pastSla)}</tr>
+          <tr><td style="${colLabel}padding:4px 0;">Solved Today</td><td style="${colToday}font-weight:bold;">${zendesk.totalHandledToday}</td>${hasPrev ? `<td style="${colYest}"></td>` : ''}</tr>
+        </table>`;
+
+  // Per-agent email breakdown
+  if (zendesk.agentCounts && Object.keys(zendesk.agentCounts).length > 0) {
+    html += `<div style="margin-top:12px;font-size:12px;color:#666;font-weight:bold;">Per Agent</div>
+        <table style="width:100%;font-size:12px;border-collapse:collapse;margin-top:4px;">
+          <tr style="color:#888;"><td style="width:25%;">Agent</td><td style="width:25%;text-align:right;">Assigned</td><td style="width:25%;text-align:right;">Past SLA</td><td style="width:25%;text-align:right;">Solved</td></tr>`;
+    CONFIG.agents.forEach(agent => {
+      const ac = zendesk.agentCounts[agent];
+      if (ac) {
+        html += `<tr><td style="width:25%;padding:2px 0;">${agent.split(" ")[0]}</td><td style="width:25%;text-align:right;">${ac.assigned || 0}</td><td style="width:25%;text-align:right;color:${ac.pastSla > 0 ? '#C62828' : 'inherit'};">${ac.pastSla || 0}</td><td style="width:25%;text-align:right;">${ac.handledToday || 0}</td></tr>`;
+      }
+    });
+    html += `</table>`;
+  }
+
+  html += `</div>`;
+
+  // ── PHONE SECTION ──
+  html += `
+      <div style="background:${cardBg};border:1px solid ${borderColor};border-radius:6px;padding:16px;margin-bottom:16px;">
+        <h2 style="margin:0 0 12px;font-size:15px;color:${navy};">Phone (Aircall)</h2>
+        <table style="width:100%;font-size:13px;border-collapse:collapse;">
+          ${compHeader}
+          <tr><td style="${colLabel}padding:4px 0;">Answer Rate</td><td style="${colToday}font-weight:bold;color:${answerRateRounded >= 75 ? '#2E7D32' : '#C62828'};">${answerRateRounded}%</td>${prevTd(prev.answerRate, "%")}</tr>
+          <tr><td style="${colLabel}padding:4px 0;">Inbound (Team Answered)</td><td style="${colToday}font-weight:bold;">${aircall.teamAnswered}</td>${hasPrev ? `<td style="${colYest}"></td>` : ''}</tr>
+          <tr><td style="${colLabel}padding:4px 0;">Forwarded to SAS</td><td style="${colToday}font-weight:bold;">${aircall.forwarded}</td>${hasPrev ? `<td style="${colYest}"></td>` : ''}</tr>
+          <tr><td style="${colLabel}padding:4px 0;">Outbound Calls</td><td style="${colToday}font-weight:bold;">${aircall.totalOutbound}</td>${hasPrev ? `<td style="${colYest}"></td>` : ''}</tr>
+          <tr><td style="${colLabel}padding:4px 0;">Avg Call Duration</td><td style="${colToday}font-weight:bold;">${formatSeconds(aircall.avgDuration || 0)}</td>${hasPrev ? `<td style="${colYest}"></td>` : ''}</tr>
+        </table>`;
+
+  // Per-agent phone breakdown
+  if (aircall.agentStats) {
+    html += `<div style="margin-top:12px;font-size:12px;color:#666;font-weight:bold;">Per Agent</div>
+        <table style="width:100%;font-size:12px;border-collapse:collapse;margin-top:4px;">
+          <tr style="color:#888;"><td style="${colLabel}">Agent</td><td style="${colToday}">In</td><td style="${colYest}">Out</td></tr>`;
+    CONFIG.agents.forEach(agent => {
+      const as = aircall.agentStats[agent];
+      if (as && (as.answered > 0 || as.outbound > 0)) {
+        html += `<tr><td style="${colLabel}padding:2px 0;">${agent.split(" ")[0]}</td><td style="${colToday}">${as.answered || 0}</td><td style="${colYest}">${as.outbound || 0}</td></tr>`;
+      }
+    });
+    html += `</table>`;
+  }
+
+  html += `</div>`;
+
+  // ── SMS SECTION ──
+  if (sms.totalToday > 0) {
+    html += `
+      <div style="background:${cardBg};border:1px solid ${borderColor};border-radius:6px;padding:16px;margin-bottom:16px;">
+        <h2 style="margin:0 0 12px;font-size:15px;color:${navy};">SMS Activity</h2>
+        <table style="width:100%;font-size:13px;border-collapse:collapse;">
+          <tr><td style="padding:4px 0;">Inbound</td><td style="text-align:right;font-weight:bold;">${sms.inbound}</td></tr>
+          <tr><td style="padding:4px 0;">Outbound</td><td style="text-align:right;font-weight:bold;">${sms.outbound}</td></tr>
+          <tr><td style="padding:4px 0;">Total</td><td style="text-align:right;font-weight:bold;">${sms.totalToday}</td></tr>
+        </table>
+      </div>`;
+  }
+
+  // ── SOCIAL SECTION ──
+  const metaUnread = meta.unreadDMs || 0;
+  const metaComments = meta.recentComments || [];
+  html += `
+      <div style="background:${cardBg};border:1px solid ${borderColor};border-radius:6px;padding:16px;margin-bottom:16px;">
+        <h2 style="margin:0 0 12px;font-size:15px;color:${navy};">Social (Meta Business Suite)</h2>
+        <table style="width:100%;font-size:13px;border-collapse:collapse;">
+          ${compHeader}
+          <tr><td style="${colLabel}padding:4px 0;">Unread DMs</td><td style="${colToday}font-weight:bold;color:${metaUnread > 0 ? '#C62828' : '#2E7D32'};">${metaUnread}</td>${prevTd(prev.unreadDMs)}</tr>
+          <tr><td style="${colLabel}padding:4px 0;">Active Conversations (24h)</td><td style="${colToday}font-weight:bold;">${metaConvos.length}</td>${hasPrev ? `<td style="${colYest}"></td>` : ''}</tr>
+          <tr><td style="${colLabel}padding:4px 0;">Comments & Mentions (24h)</td><td style="${colToday}font-weight:bold;">${metaComments.length}</td>${hasPrev ? `<td style="${colYest}"></td>` : ''}</tr>
+        </table>`;
+
+  // List unread DMs
+  if (unreadConvos.length > 0) {
+    html += `<div style="margin-top:12px;font-size:12px;color:#666;font-weight:bold;">Unread DMs</div>
+        <table style="width:100%;font-size:12px;border-collapse:collapse;margin-top:4px;">`;
+    unreadConvos.slice(0, 5).forEach(c => {
+      const platform = c.platform === "Instagram" ? "IG" : "FB";
+      const msg = c.lastMessage ? (c.lastMessage.length > 60 ? c.lastMessage.substring(0, 57) + "..." : c.lastMessage) : "";
+      html += `<tr><td style="padding:2px 0;"><strong>${c.customerName}</strong> <span style="color:${c.platform === 'Instagram' ? '#C13584' : '#1877F2'};font-size:10px;">${platform}</span></td></tr>`;
+      if (msg) html += `<tr><td style="padding:0 0 4px;color:#888;font-style:italic;">${msg}</td></tr>`;
+    });
+    html += `</table>`;
+  }
+  html += `</div>`;
+
+  // ── CSAT SECTION (summary only) ──
+  const emailCsat = csat || {};
+  const phoneCsat = postCall || {};
+  const totalCsatResponses = (emailCsat.total || 0) + (phoneCsat.total || 0);
+  if (totalCsatResponses > 0) {
+    html += `
+      <div style="background:${cardBg};border:1px solid ${borderColor};border-radius:6px;padding:16px;margin-bottom:16px;">
+        <h2 style="margin:0 0 12px;font-size:15px;color:${navy};">Customer Satisfaction (Last 24h)</h2>
+        <table style="width:100%;font-size:13px;border-collapse:collapse;">`;
+    if (emailCsat.score !== null && emailCsat.score !== undefined) {
+      html += `<tr><td style="padding:4px 0;">Email CSAT</td><td style="text-align:right;font-weight:bold;">${emailCsat.score}% (${emailCsat.total} reviews)</td></tr>`;
+    }
+    if (phoneCsat.score !== null && phoneCsat.score !== undefined) {
+      html += `<tr><td style="padding:4px 0;">Phone CSAT</td><td style="text-align:right;font-weight:bold;">${phoneCsat.score}% (${phoneCsat.total} reviews)</td></tr>`;
+    }
+    html += `</table>
+      </div>`;
+  }
+
+  // ── TOKEN WARNING ──
+  if (meta.tokenWarning) {
+    html += `<div style="background:#FFF3CD;border:1px solid #FFE69C;border-radius:6px;padding:12px 16px;margin-bottom:16px;font-size:13px;color:#856404;">Warning: ${meta.tokenWarning}</div>`;
+  }
+
+  // Footer with health status definitions
+  html += `
+      <div style="border-top:1px solid ${borderColor};margin-top:20px;padding:16px 0 4px;font-size:11px;color:#999;">
+        <div style="margin-bottom:8px;font-weight:bold;color:#888;">Health Status Thresholds</div>
+        <div style="margin-bottom:4px;">Email: Healthy = 0 tickets past ${zendesk.slaHours}h SLA · Watch = 1-5 past SLA · At Risk = 6+ past SLA</div>
+        <div style="margin-bottom:4px;">Phone: Healthy = ${th.phoneAnswerRate.green}%+ answer rate · Watch = ${th.phoneAnswerRate.yellow}-${th.phoneAnswerRate.green - 1}% · At Risk = below ${th.phoneAnswerRate.yellow}%</div>
+        <div style="margin-bottom:4px;">Social: Healthy = oldest unread DM under ${th.socialResponseTime.green / 60}h · Watch = ${th.socialResponseTime.green / 60}-${th.socialResponseTime.yellow / 60}h · At Risk = over ${th.socialResponseTime.yellow / 60}h</div>
+        <div style="margin-bottom:4px;">The "Yesterday" column shows the previous working day's end-of-day values for comparison.</div>
+      </div>
+      <div style="text-align:center;padding:8px 0;font-size:11px;color:#999;">
+        CS Command Center v1.7.0 · End of Day Summary · ${dateStr}
+      </div>
+    </div>
+  </div>`;
+
+  // Send email
+  const subject = `CS End of Day Summary — ${Utilities.formatDate(now, tz, "MMM d")} — Email: ${healthLabels[emailHealth]} | Phone: ${healthLabels[phoneHealth]} | Social: ${healthLabels[socialHealth]}`;
+
+  GmailApp.sendEmail(recipients, subject, "View this email with HTML enabled.", {
+    htmlBody: html,
+    name: "CS Command Center",
+  });
+
+  Logger.log("End of day summary sent to: " + recipients);
+
+  // Save today's snapshot for tomorrow's comparison
+  const snapshot = {
+    openTickets: zendesk.totalOpen,
+    onHold: zendesk.onHoldQueueCount,
+    unassigned: zendesk.unassigned,
+    sasTickets: sasCount,
+    pastSla: zendesk.totalBreached,
+    openVoicemails: zendesk.openVoicemails || 0,
+    answerRate: answerRateRounded,
+    unreadDMs: metaUnread,
+    date: Utilities.formatDate(now, tz, "yyyy-MM-dd"),
+  };
+  props.setProperty("RECAP_PREV_SNAPSHOT", JSON.stringify(snapshot));
+  Logger.log("Saved daily snapshot for comparison: " + JSON.stringify(snapshot));
+}
+
+// Set up the daily recap trigger (run once from Apps Script editor)
+// Slimmed-down email for weekends and Deako holidays — queue state only, no performance metrics
+function sendNonWorkingDaySnapshot(zendesk, meta, now, dateStr, tz, recipients) {
+  const props = PropertiesService.getScriptProperties();
+  const navy = "#1B3747";
+  const cardBg = "#F8F7F6";
+  const borderColor = "#E1DFDD";
+  const sasCount = (zendesk.sasTickets && zendesk.sasTickets.length) || 0;
+  const vmCount = zendesk.openVoicemails || 0;
+  const metaUnread = meta.unreadDMs || 0;
+  const metaConvos = (meta.recentConversations || []);
+
+  // Load last working day snapshot for comparison
+  const prevJson = props.getProperty("RECAP_PREV_SNAPSHOT") || "{}";
+  let prev = {};
+  try { prev = JSON.parse(prevJson); } catch (e) { prev = {}; }
+  const prevDate = prev.date || "";
+  // Format prev date as "May 15 EOD" for column header
+  let prevLabel = "";
+  if (prevDate) {
+    const pd = new Date(prevDate + "T12:00:00");  // noon to avoid timezone issues
+    prevLabel = Utilities.formatDate(pd, tz, "MMM d") + " EOD";
+  }
+
+  // Determine if we have previous data for the EOD column
+  const hasPrev = prev.date ? true : false;
+  function prevTd(prevVal, unit) {
+    if (!hasPrev || prevVal === undefined || prevVal === null) return hasPrev ? `<td style="text-align:right;color:#AAA;font-size:12px;">-</td>` : "";
+    const u = unit || "";
+    return `<td style="text-align:right;color:#888;font-size:12px;">${prevVal}${u}</td>`;
+  }
+  const nwdCompHeader = hasPrev
+    ? `<tr style="border-bottom:1px solid #E1DFDD;"><td style="width:50%;"></td><td style="width:25%;text-align:right;font-size:11px;color:#888;padding-bottom:6px;font-weight:bold;">Now</td><td style="width:25%;text-align:right;font-size:11px;color:#888;padding-bottom:6px;font-weight:bold;">${prevLabel}</td></tr>`
+    : "";
+
+  let html = `
+  <div style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto;color:#1D1D1D;">
+    <div style="background:${navy};color:#fff;padding:16px 24px;border-radius:8px 8px 0 0;">
+      <h1 style="margin:0;font-size:20px;">CS Command Center — Non-Working Day Snapshot</h1>
+      <p style="margin:4px 0 0;font-size:13px;color:#C3D3D7;">${dateStr}</p>
+    </div>
+
+    <div style="padding:20px 24px;background:#fff;border:1px solid ${borderColor};border-top:none;">
+
+      <div style="background:${cardBg};border:1px solid ${borderColor};border-radius:6px;padding:16px;margin-bottom:16px;">
+        <h2 style="margin:0 0 12px;font-size:15px;color:${navy};">Email Queue (Zendesk)</h2>
+        <table style="width:100%;font-size:13px;border-collapse:collapse;">
+          ${nwdCompHeader}
+          <tr><td style="padding:4px 0;">Open Tickets</td><td style="text-align:right;font-weight:bold;">${zendesk.totalOpen}</td>${prevTd(prev.openTickets)}</tr>
+          <tr><td style="padding:4px 0;">On Hold</td><td style="text-align:right;font-weight:bold;">${zendesk.onHoldQueueCount}</td>${prevTd(prev.onHold)}</tr>
+          <tr><td style="padding:4px 0;">Unassigned</td><td style="text-align:right;font-weight:bold;">${zendesk.unassigned}</td>${prevTd(prev.unassigned)}</tr>
+          <tr><td style="padding:4px 0;">SAS Tickets</td><td style="text-align:right;font-weight:bold;">${sasCount}</td>${prevTd(prev.sasTickets)}</tr>
+        </table>
+      </div>
+
+      <div style="background:${cardBg};border:1px solid ${borderColor};border-radius:6px;padding:16px;margin-bottom:16px;">
+        <h2 style="margin:0 0 12px;font-size:15px;color:${navy};">Phone (Voicemails)</h2>
+        <table style="width:100%;font-size:13px;border-collapse:collapse;">
+          ${nwdCompHeader}
+          <tr><td style="padding:4px 0;">Open Voicemails</td><td style="text-align:right;font-weight:bold;">${vmCount}</td>${prevTd(prev.openVoicemails)}</tr>
+        </table>
+      </div>
+
+      <div style="background:${cardBg};border:1px solid ${borderColor};border-radius:6px;padding:16px;margin-bottom:16px;">
+        <h2 style="margin:0 0 12px;font-size:15px;color:${navy};">Social (Meta Business Suite)</h2>
+        <table style="width:100%;font-size:13px;border-collapse:collapse;">
+          ${nwdCompHeader}
+          <tr><td style="padding:4px 0;">Unread DMs</td><td style="text-align:right;font-weight:bold;color:${metaUnread > 0 ? '#C62828' : '#2E7D32'};">${metaUnread}</td>${prevTd(prev.unreadDMs)}</tr>
+          <tr><td style="padding:4px 0;">Active Conversations (24h)</td><td style="text-align:right;font-weight:bold;">${metaConvos.length}</td>${hasPrev ? '<td></td>' : ''}</tr>
+        </table>
+      </div>
+
+      <div style="text-align:center;padding:16px 0 8px;font-size:11px;color:#999;">
+        CS Command Center v1.7.0 · Non-Working Day Snapshot · ${dateStr}
+      </div>
+    </div>
+  </div>`;
+
+  const subject = `CS Non-Working Day Snapshot — ${Utilities.formatDate(now, tz, "MMM d")} — Open: ${zendesk.totalOpen} · VM: ${vmCount} · Unread DMs: ${metaUnread}`;
+
+  GmailApp.sendEmail(recipients, subject, "View this email with HTML enabled.", {
+    htmlBody: html,
+    name: "CS Command Center",
+  });
+
+  Logger.log("Non-working day snapshot sent to: " + recipients);
+}
+
+// Test function: sends the non-working day snapshot using live data. Run from Apps Script editor.
+function testNonWorkingDayEmail() {
+  loadThresholds();
+  const props = PropertiesService.getScriptProperties();
+  const recipients = props.getProperty("RECAP_RECIPIENTS") || "";
+  if (!recipients) { Logger.log("RECAP_RECIPIENTS not set"); return; }
+
+  const zendesk = fetchZendeskStatus();
+  const meta = fetchMetaStatus();
+  const tz = CONFIG.businessHours.timezone;
+  const now = new Date();
+  const dateStr = Utilities.formatDate(now, tz, "EEEE, MMMM d, yyyy");
+
+  sendNonWorkingDaySnapshot(zendesk, meta, now, dateStr, tz, recipients);
+  Logger.log("Test non-working day email sent to: " + recipients);
+}
+
+function setupDailyRecapTrigger() {
+  // Remove any existing recap triggers
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction() === "sendDailyRecap") {
+      ScriptApp.deleteTrigger(t);
+    }
+  });
+
+  // Create new trigger: daily at 6pm PST (18:00)
+  ScriptApp.newTrigger("sendDailyRecap")
+    .timeBased()
+    .atHour(18)
+    .everyDays(1)
+    .inTimezone("America/Los_Angeles")
+    .create();
+
+  Logger.log("Daily recap trigger set for 6:00 PM PST");
+}
+
+// --- DEBUG: Voicemail ticket inspection (run from editor, delete after) ---
+function debugVoicemailTickets() {
+  const props = PropertiesService.getScriptProperties();
+  const token = props.getProperty("ZENDESK_TOKEN");
+  const subdomain = CONFIG.zendesk.subdomain;
+  const authHeader = "Basic " + Utilities.base64Encode(token);
+  const headers = { "Authorization": authHeader, "Content-Type": "application/json" };
+  const fetchOpts = { method: "get", headers: headers, muteHttpExceptions: true };
+
+  // Search for voicemail tickets on support lines — any status, last 30 days
+  const queries = [
+    'type:ticket subject:"Voicemail on pro support" created>30daysAgo',
+    'type:ticket subject:"Voicemail on nonpro support" created>30daysAgo',
+  ];
+  let allResults = [];
+  queries.forEach(query => {
+    const url = `https://${subdomain}.zendesk.com/api/v2/search.json?query=${encodeURIComponent(query)}&per_page=20&sort_by=created_at&sort_order=desc`;
+    const resp = UrlFetchApp.fetch(url, fetchOpts);
+    const data = JSON.parse(resp.getContentText());
+    allResults = allResults.concat(data.results || []);
+  });
+  const data = { results: allResults };
+
+  const results = (data.results || []).map(t => ({
+    id: t.id,
+    subject: t.subject,
+    status: t.status,
+    created: t.created_at,
+    via_channel: t.via ? t.via.channel : "unknown",
+    via_source: t.via ? JSON.stringify(t.via.source) : "unknown",
+    tags: (t.tags || []).join(", "),
+    group_id: t.group_id,
+    assignee_id: t.assignee_id,
+    description_preview: (t.description || "").substring(0, 200),
+  }));
+
+  Logger.log("=== VOICEMAIL TICKETS (" + results.length + " found) ===");
+  results.forEach(t => {
+    Logger.log("---");
+    Logger.log("ID: " + t.id + " | Status: " + t.status + " | Created: " + t.created);
+    Logger.log("Subject: " + t.subject);
+    Logger.log("Via: " + t.via_channel + " | Source: " + t.via_source);
+    Logger.log("Tags: " + t.tags);
+    Logger.log("Group: " + t.group_id + " | Assignee: " + t.assignee_id);
+    Logger.log("Description: " + t.description_preview);
+  });
+
+  // Also dump to a sheet for easier viewing
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = getOrCreateSheet(ss, "Debug Voicemail");
+  sheet.clear();
+  sheet.appendRow(["ID", "Subject", "Status", "Created", "Via Channel", "Via Source", "Tags", "Group ID", "Assignee", "Description Preview"]);
+  results.forEach(t => {
+    sheet.appendRow([t.id, t.subject, t.status, t.created, t.via_channel, t.via_source, t.tags, t.group_id, t.assignee_id, t.description_preview]);
+  });
+  sheet.getRange("1:1").setFontWeight("bold");
+  Logger.log("Results also written to 'Debug Voicemail' sheet");
 }
 
 // --- HELPER FUNCTIONS ---
