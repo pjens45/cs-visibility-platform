@@ -740,12 +740,12 @@ function analyzeDailyThemes() {
   const emailTickets = tickets.filter(t => !(t.tags || []).includes("aircall"));
   const callTickets = tickets.filter(t => (t.tags || []).includes("aircall"));
 
-  // Build email/web ticket summaries with full descriptions
+  // Build email/web ticket summaries with full descriptions and ticket IDs
   const emailSummaries = emailTickets.map(t => {
     const tags = (t.tags || []).filter(tag => !tag.match(/^\d+$/)).slice(0, 8).join(", ");
     const channel = t.via && t.via.channel ? t.via.channel : "unknown";
     const desc = (t.description || "").replace(/\n{3,}/g, "\n\n").substring(0, 800);
-    return `[${channel}] ${t.subject || "(no subject)"}${tags ? " (tags: " + tags + ")" : ""}\n${desc}`;
+    return `[#${t.id}] [${channel}] ${t.subject || "(no subject)"}${tags ? " (tags: " + tags + ")" : ""}\n${desc}`;
   });
 
   // Build call summaries from ci- tags (these are AI-generated call intents)
@@ -762,23 +762,45 @@ function analyzeDailyThemes() {
     .map(([label, count]) => `  ${label}: ${count}`)
     .join("\n");
 
-  // Build the prompt
-  const prompt = `You are analyzing today's customer support activity for Deako, a smart lighting company that makes smart switches, dimmers, and a mobile app (Deco).
+  // Build call ticket ID list for citation
+  const callTicketIds = callTickets.map(t => t.id);
 
-TODAY'S VOLUME: ${tickets.length} total tickets (${emailTickets.length} email/web/messaging, ${callTickets.length} phone calls)
+  // Build the prompt -- asks for ticket IDs so we can persist them
+  // System prompt with taxonomy vocabulary (cached across calls)
+  const systemPrompt = `You are analyzing daily customer support activity for Deako, a smart lighting company that makes smart switches, dimmers, backplates, faceplates, outlets, and a mobile app.
+
+Use the following taxonomy vocabulary when naming themes. Themes should use these exact terms so they are consistent and aggregatable over time.
+
+SYMPTOM CATEGORIES: Connectivity > WiFi (Cannot Connect, Intermittent Drops, Slow Response, Won't Reconnect After Change), Connectivity > Bluetooth (Cannot Pair, Lost Connection, Range Issues), Connectivity > Integration Link (Device Not Discovered, Commands Unresponsive, Shows Offline, State Out of Sync), Connectivity > Cloud / Remote Access (Commands Failed, State Out of Sync, Cloud Unreachable), Hardware > Electrical (No Power, Flickering, Buzzing/Humming, Breaker Tripping, Overheating/Thermal Shutoff, Dimming Issues), Hardware > Physical (Doesn't Fit, Button Stuck, Cosmetic Damage, Dead on Arrival), Software/App (Crash/Freeze, UI/Display Issue, Firmware/App Update, Feature Not Working > Scheduling/Scenes/Notifications/Sharing)
+REQUEST TYPES: Technical Issue, How-To/Education, Warranty Claim, Return/Exchange, Order Cancellation, Order Inquiry, Account Update, Compatibility Question, Purchase Inquiry, Feature Request, Scheduling/Dispatch, Missed Call/Voicemail
+PRODUCT FAMILIES: Smart Switch, Smart Switch Gen 2, Smart Switch Multiway, Smart Dimmer (Single Pole, Master, Remote), Smart Plug, Simple Switches (Rocker, 3-Way, Multiway), Simple Dimmers, Specialty (Motion, Fan Speed, Timer, Nightlight), Backplates, Faceplates, Outlets, Deako App
+PARTNERS: Safe Haven/ADT, D.R. Horton
+CUSTOMER SENTIMENT: Positive, Neutral, Frustrated, Angry/Escalation Risk
+
+For each analysis, identify exactly 3 top themes ranked by ticket count (theme 1 = most tickets). For each theme:
+1. Name it using the taxonomy vocabulary above (e.g. "Connectivity > WiFi > Won't Reconnect After Change -- Smart Switch Gen 2, Post-Install" not "WiFi problems")
+2. List the ticket IDs that relate to this theme
+3. Write 1 sentence explaining the pattern
+4. For each ticket in the theme, classify the customer's sentiment individually (Positive, Neutral, Frustrated, or Angry/Escalation Risk) based on their messages
+
+You MUST respond with valid JSON only, no other text. Use this exact format:
+[
+  {"theme": "Taxonomy-based Theme Name", "ticket_ids": [12345, 12346, 12347], "ticket_sentiments": {"12345": "Frustrated", "12346": "Neutral", "12347": "Frustrated"}, "summary": "One sentence explanation."},
+  {"theme": "Taxonomy-based Theme Name", "ticket_ids": [12348, 12349], "ticket_sentiments": {"12348": "Neutral", "12349": "Neutral"}, "summary": "One sentence explanation."},
+  {"theme": "Taxonomy-based Theme Name", "ticket_ids": [12350, 12351], "ticket_sentiments": {"12350": "Frustrated", "12351": "Angry/Escalation Risk"}, "summary": "One sentence explanation."}
+]`;
+
+  // User message with today's ticket data (changes every call)
+  const userMessage = `TODAY'S VOLUME: ${tickets.length} total tickets (${emailTickets.length} email/web/messaging, ${callTickets.length} phone calls)
 
 EMAIL/WEB/MESSAGING TICKETS (${emailTickets.length} tickets with full descriptions):
 ${emailSummaries.slice(0, 50).join("\n---\n")}
 
 PHONE CALL TOPICS (${callTickets.length} calls, AI-tagged intents ranked by frequency):
 ${callIntentSummary || "(no call intent data)"}
+Phone call ticket IDs: ${callTicketIds.join(", ")}
 
-Based on ALL of the above, identify exactly 3 top themes from today's support activity. For each theme:
-1. Give it a short, specific name (e.g. "Wi-Fi connectivity after router change" not "Technical issues")
-2. Estimate how many tickets/calls relate to this theme
-3. Write 1 sentence explaining the pattern
-
-Format your response as exactly 3 numbered items, no extra text before or after. Keep each item to 2 lines max.`;
+Identify the top 3 themes from today's activity.`;
 
   try {
     const response = UrlFetchApp.fetch("https://api.anthropic.com/v1/messages", {
@@ -786,12 +808,14 @@ Format your response as exactly 3 numbered items, no extra text before or after.
       headers: {
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
+        "anthropic-beta": "prompt-caching-2024-07-31",
         "Content-Type": "application/json",
       },
       payload: JSON.stringify({
         model: "claude-haiku-4-5-20251001",
-        max_tokens: 500,
-        messages: [{ role: "user", content: prompt }],
+        max_tokens: 1000,
+        system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
+        messages: [{ role: "user", content: userMessage }],
       }),
       muteHttpExceptions: true,
     });
@@ -800,16 +824,228 @@ Format your response as exactly 3 numbered items, no extra text before or after.
       const data = JSON.parse(response.getContentText());
       if (data.content && data.content[0] && data.content[0].text) {
         const raw = data.content[0].text.trim();
-        Logger.log("Daily themes analysis: " + raw);
-        // Convert to HTML (preserve numbering, escape HTML)
-        const escaped = raw.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-        return escaped.replace(/\n/g, "<br>");
+        Logger.log("Daily themes analysis (raw): " + raw);
+
+        // Parse JSON response
+        let themes = [];
+        try {
+          themes = JSON.parse(raw);
+        } catch (parseErr) {
+          // Fallback: try to extract JSON from the response if wrapped in text
+          const jsonMatch = raw.match(/\[[\s\S]*\]/);
+          if (jsonMatch) {
+            themes = JSON.parse(jsonMatch[0]);
+          } else {
+            Logger.log("Could not parse themes as JSON, falling back to text");
+            const escaped = raw.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+            return { html: escaped.replace(/\n/g, "<br>"), themes: [] };
+          }
+        }
+
+        // Sort themes by ticket count descending (stack rank: #1 = most tickets)
+        themes.sort((a, b) => (b.ticket_ids || []).length - (a.ticket_ids || []).length);
+
+        // Log themes with ticket IDs to the Daily Themes Log sheet
+        try {
+          logDailyThemes(todayStr, themes);
+        } catch (logErr) {
+          Logger.log("Theme logging failed (non-fatal): " + logErr.toString());
+        }
+
+        // Build HTML for email (human-readable format)
+        const subdomain2 = CONFIG.zendesk.subdomain;
+        let themesHtml = "";
+        themes.forEach((t, i) => {
+          const ticketCount = (t.ticket_ids || []).length;
+          const escapedTheme = (t.theme || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+          const escapedSummary = (t.summary || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+          // Build sentiment sentence from per-ticket sentiments
+          let sentimentSentence = "";
+          const sentiments = t.ticket_sentiments || {};
+          const sentVals = Object.values(sentiments);
+          if (sentVals.length > 0) {
+            const frustrated = sentVals.filter(s => s === "Frustrated").length;
+            const angry = sentVals.filter(s => s === "Angry/Escalation Risk" || s === "Angry / Escalation Risk").length;
+            const negative = frustrated + angry;
+            const total = sentVals.length;
+            if (negative === 0) {
+              sentimentSentence = "Tone is neutral.";
+            } else if (negative === total) {
+              sentimentSentence = total === 1
+                ? "Customer is " + (angry > 0 ? "angry." : "frustrated.")
+                : "All " + total + " customers expressed frustration.";
+            } else {
+              const parts = [];
+              if (frustrated > 0) parts.push(frustrated + " frustrated");
+              if (angry > 0) parts.push(angry + " angry");
+              sentimentSentence = parts.join(", ") + " of " + total + " customers.";
+            }
+          }
+
+          const sentColor = sentimentSentence.includes("angry") ? "#C62828"
+            : sentimentSentence.includes("frustrated") || sentimentSentence.includes("frustration") ? "#E65100"
+            : "#888";
+
+          themesHtml += `${i + 1}. <strong>${escapedTheme}</strong><br>`;
+          themesHtml += `${ticketCount} tickets/calls. ${escapedSummary}`;
+          if (sentimentSentence) themesHtml += ` <span style="color:${sentColor};font-size:12px;">${sentimentSentence}</span>`;
+          themesHtml += `<br>`;
+          if (i < themes.length - 1) themesHtml += `<br>`;
+        });
+
+        return { html: themesHtml, themes: themes };
       }
     } else {
       Logger.log("Daily themes API error: " + response.getResponseCode() + " " + response.getContentText().substring(0, 200));
     }
   } catch (e) {
     Logger.log("Daily themes API call failed: " + e.toString());
+  }
+  return null;
+}
+
+// Log daily themes with ticket IDs to a dedicated sheet tab
+function logDailyThemes(dateStr, themes) {
+  const ss = SpreadsheetApp.openById(CONFIG.sheetId);
+  let sheet = ss.getSheetByName("Daily Themes Log");
+  if (!sheet) {
+    sheet = ss.insertSheet("Daily Themes Log");
+    sheet.appendRow(["Date", "Theme #", "Theme Name", "Ticket Count", "Ticket IDs", "Summary", "Sentiment"]);
+    sheet.getRange(1, 1, 1, 7).setFontWeight("bold");
+    sheet.setFrozenRows(1);
+  }
+
+  themes.forEach((t, i) => {
+    const ticketIds = (t.ticket_ids || []).join(", ");
+    // Summarize per-ticket sentiments for the log
+    const sentiments = t.ticket_sentiments || {};
+    const sentSummary = Object.entries(sentiments).map(([id, s]) => id + ":" + s).join(", ") || (t.sentiment || "");
+    sheet.appendRow([
+      dateStr,
+      i + 1,
+      t.theme || "",
+      (t.ticket_ids || []).length,
+      ticketIds,
+      t.summary || "",
+      sentSummary,
+    ]);
+  });
+  Logger.log("Logged " + themes.length + " themes to Daily Themes Log for " + dateStr);
+}
+
+// ─── AI RECAP TREND ANALYSIS ───
+// Reads from the Daily Themes Log sheet for a date range and sends to Claude
+// to identify recurring patterns and trends. Used by weekly and monthly emails.
+function analyzeThemeTrends(startDate, endDate, periodLabel) {
+  const props = PropertiesService.getScriptProperties();
+  const apiKey = props.getProperty("ANTHROPIC_API_KEY");
+  if (!apiKey) return null;
+
+  const ss = SpreadsheetApp.openById(CONFIG.sheetId);
+  const sheet = ss.getSheetByName("Daily Themes Log");
+  if (!sheet) return null;
+
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) return null;
+
+  // Filter rows to the date range
+  const rows = [];
+  for (let i = 1; i < data.length; i++) {
+    const rowDate = data[i][0]; // Date column
+    if (rowDate >= startDate && rowDate <= endDate) {
+      rows.push({
+        date: rowDate,
+        rank: data[i][1],
+        theme: data[i][2],
+        ticketCount: data[i][3],
+        ticketIds: data[i][4],
+        summary: data[i][5],
+        sentiment: data[i][6] || "",
+      });
+    }
+  }
+
+  if (rows.length === 0) return null;
+
+  const themeSummaries = rows.map(r =>
+    `${r.date} | #${r.rank} | ${r.theme} | ${r.ticketCount} tickets | ${r.sentiment} | ${r.summary}`
+  ).join("\n");
+
+  const systemPrompt = `You are analyzing support theme trends for Deako, a smart lighting company. You are reviewing the daily AI Recap theme data for a ${periodLabel} period to identify recurring patterns, emerging issues, and notable shifts.
+
+Use Deako's taxonomy vocabulary for consistency: Connectivity (WiFi, Bluetooth, Cloud/Remote Access, Integration Link), Hardware (Electrical, Physical, LED), Software/App (Crash, UI, Firmware, Scheduling/Scenes/Notifications), and product families (Smart Switch, Smart Switch Gen 2, Smart Dimmer, Backplates, Deako App, etc).
+
+You MUST respond with valid JSON only, no other text. Use this exact format:
+[
+  {"trend": "Trend Name", "frequency": "appeared X of Y days", "summary": "One sentence on the pattern.", "sentiment": "Predominant sentiment"},
+  {"trend": "Trend Name", "frequency": "appeared X of Y days", "summary": "One sentence on the pattern.", "sentiment": "Predominant sentiment"},
+  {"trend": "Trend Name", "frequency": "appeared X of Y days", "summary": "One sentence on the pattern.", "sentiment": "Predominant sentiment"}
+]`;
+
+  const userMessage = `PERIOD: ${periodLabel}
+DAILY THEME DATA (${rows.length} theme entries across the period):
+${themeSummaries}
+
+Identify the top 3 recurring trends or patterns from this period's daily themes. Rank by frequency and impact. Note if any theme is new/emerging vs persistent.`;
+
+  try {
+    const response = UrlFetchApp.fetch("https://api.anthropic.com/v1/messages", {
+      method: "post",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "prompt-caching-2024-07-31",
+        "Content-Type": "application/json",
+      },
+      payload: JSON.stringify({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 800,
+        system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
+        messages: [{ role: "user", content: userMessage }],
+      }),
+      muteHttpExceptions: true,
+    });
+
+    if (response.getResponseCode() === 200) {
+      const respData = JSON.parse(response.getContentText());
+      if (respData.content && respData.content[0] && respData.content[0].text) {
+        const raw = respData.content[0].text.trim();
+        let trends = [];
+        try {
+          trends = JSON.parse(raw);
+        } catch (parseErr) {
+          const jsonMatch = raw.match(/\[[\s\S]*\]/);
+          if (jsonMatch) {
+            trends = JSON.parse(jsonMatch[0]);
+          } else {
+            Logger.log("Could not parse trend analysis as JSON");
+            return null;
+          }
+        }
+
+        // Build HTML
+        let trendsHtml = "";
+        trends.forEach((t, i) => {
+          const escapedTrend = (t.trend || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+          const escapedSummary = (t.summary || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+          const frequency = (t.frequency || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+          const sentiment = (t.sentiment || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+          const sentimentColor = sentiment === "Angry / Escalation Risk" ? "#C62828" : sentiment === "Frustrated" ? "#E65100" : "#888";
+          trendsHtml += `${i + 1}. <strong>${escapedTrend}</strong><br>`;
+          trendsHtml += `${frequency} | ${escapedSummary}`;
+          if (sentiment) trendsHtml += ` <span style="color:${sentimentColor};font-size:11px;">[${sentiment}]</span>`;
+          trendsHtml += `<br>`;
+          if (i < trends.length - 1) trendsHtml += `<br>`;
+        });
+
+        return trendsHtml;
+      }
+    } else {
+      Logger.log("Theme trend API error: " + response.getResponseCode());
+    }
+  } catch (e) {
+    Logger.log("Theme trend analysis failed: " + e.toString());
   }
   return null;
 }
@@ -2013,7 +2249,7 @@ function _writeDashboardContent(ss, dash, zendesk, aircall, csat, postCall, sms,
   dash.setRowHeight(ethRow, 20);
   dash.getRange(`A${ethRow}:B${ethRow}`).merge().setValue("Owner")
     .setFontWeight("bold").setFontSize(9).setFontColor(gray).setBackground(bg);
-  dash.getRange(`C${ethRow}`).setValue("Assigned")
+  dash.getRange(`C${ethRow}`).setValue("New+Open")
     .setFontWeight("bold").setFontSize(9).setFontColor(gray).setBackground(bg).setHorizontalAlignment("right");
   // 12+ Hrs — warm tint group
   dash.getRange(`D${ethRow}`).setValue(`${slaHours}+ Hrs`)
@@ -2719,7 +2955,9 @@ function _writeDashboardContent(ss, dash, zendesk, aircall, csat, postCall, sms,
 
     // Show up to 10 conversations
     metaConversations.slice(0, 10).forEach((convo, cIdx) => {
-      const rowBg = convo.unread > 0 ? amberLt : (cIdx % 2 === 1 ? altRow : cardBg);
+      // Skip orange highlight for conversations handed off or resolved
+      const isHandedOff = handedOffNames && handedOffNames.has(convo.customerName);
+      const rowBg = (convo.unread > 0 && !isHandedOff) ? amberLt : (cIdx % 2 === 1 ? altRow : cardBg);
 
       // Row 1: Customer name, platform badge, from, time
       dash.setRowHeight(sRow, 20);
@@ -2874,7 +3112,7 @@ function _writeDashboardContent(ss, dash, zendesk, aircall, csat, postCall, sms,
 
   // Footer — version & goals
   dash.getRange(`A${lastRow}:Z${lastRow}`).merge()
-    .setValue(`CS Command Center v2.0.0  ·  Refreshes every 5 min  ·  Goal: reply within ${slaHours} business hours · answer ${CONFIG.thresholds.phoneAnswerRate.green}%+ inbound calls · Mon–Fri 6a–5p PST`)
+    .setValue(`CS Command Center v2.3.0  ·  Refreshes every 5 min  ·  Goal: reply within ${slaHours} business hours · answer ${CONFIG.thresholds.phoneAnswerRate.green}%+ inbound calls · Mon–Fri 6a–5p PST`)
     .setFontColor(gray).setFontSize(8).setFontStyle("italic")
     .setHorizontalAlignment("center").setBackground(bg);
 
@@ -4555,6 +4793,11 @@ function readSMSActivity() {
 // Schedule: run setupDailyRecapTrigger() once to set up the 6pm PST daily trigger.
 
 function sendDailyRecap(recipientOverride, skipSave) {
+  // When called by a time-driven trigger, the first arg is an event object -- ignore it
+  if (recipientOverride && typeof recipientOverride !== "string") {
+    recipientOverride = null;
+    skipSave = false;
+  }
   loadThresholds();
   const props = PropertiesService.getScriptProperties();
   const recipients = recipientOverride || props.getProperty("RECAP_RECIPIENTS") || "";
@@ -4587,7 +4830,10 @@ function sendDailyRecap(recipientOverride, skipSave) {
   // ── AI-powered daily theme analysis (runs early, non-blocking) ──
   let dailyThemesHtml = null;
   try {
-    dailyThemesHtml = analyzeDailyThemes();
+    const themesResult = analyzeDailyThemes();
+    if (themesResult) {
+      dailyThemesHtml = typeof themesResult === "string" ? themesResult : themesResult.html;
+    }
   } catch (e) {
     Logger.log("Daily themes analysis failed (non-fatal): " + e.toString());
   }
@@ -4661,7 +4907,7 @@ function sendDailyRecap(recipientOverride, skipSave) {
   let html = `
   <div style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto;color:#1D1D1D;">
     <div style="background:${navy};color:#fff;padding:16px 24px;border-radius:8px 8px 0 0;">
-      <h1 style="margin:0;font-size:20px;">CS Command Center — End of Day Summary</h1>
+      <h1 style="margin:0;font-size:20px;">CS AI Recap — Daily</h1>
       <p style="margin:4px 0 0;font-size:13px;color:#C3D3D7;">${dateStr}</p>
     </div>
 
@@ -4709,43 +4955,39 @@ function sendDailyRecap(recipientOverride, skipSave) {
           <tr><td style="${colLabel}padding:4px 0;">Past SLA (${zendesk.slaHours}h)</td><td style="${colToday}font-weight:bold;color:${healthColors[emailHealth]};">${zendesk.totalBreached}</td>${prevTd(prev.pastSla)}</tr>
           <tr><td style="${colLabel}padding:4px 0;">Solved Today</td><td style="${colToday}font-weight:bold;">${zendesk.totalHandledToday}</td>${prevTd(prev.solvedTotal)}</tr>`;
 
-  // Per-agent rows integrated into the same table
+  html += `</table>`;
+
+  // Per-agent horizontal table (agent names as rows, metrics as columns)
   if (zendesk.agentCounts && Object.keys(zendesk.agentCounts).length > 0) {
-    const colSpan = hasPrev ? 3 : 2;
-    html += `<tr><td style="${subH1}" colspan="${colSpan}">Per Agent</td></tr>`;
+    const agentHeaderStyle = `font-size:11px;color:#888;font-weight:bold;text-align:center;padding:4px 6px;border-bottom:1px solid #E1DFDD;`;
+    const agentNameStyle = `font-size:12px;padding:3px 0;font-weight:bold;`;
+    const agentCellStyle = `font-size:12px;text-align:center;padding:3px 6px;`;
 
-    // Assigned
-    html += `<tr><td style="${subH2}" colspan="${colSpan}">Assigned</td></tr>`;
+    html += `
+        <div style="margin-top:12px;font-size:12px;color:${navy};font-weight:bold;border-top:1px solid #E1DFDD;padding-top:10px;">Per Agent</div>
+        <table style="width:100%;font-size:12px;border-collapse:collapse;margin-top:6px;">
+          <tr>
+            <td style="${agentHeaderStyle}text-align:left;"></td>
+            <td style="${agentHeaderStyle}">Assigned</td>
+            <td style="${agentHeaderStyle}">Past SLA</td>
+            <td style="${agentHeaderStyle}">Solved</td>
+          </tr>`;
     CONFIG.agents.forEach(agent => {
       const ac = zendesk.agentCounts[agent];
       if (ac) {
-        const pe = prevAgentEmail[agent] || {};
-        html += `<tr><td style="${colLabel}${agentRow}">${agent.split(" ")[0]}</td><td style="${colToday}">${ac.assigned || 0}</td>${hasPrev ? `<td style="${colYest}color:#888;font-size:12px;">${pe.assigned !== undefined ? pe.assigned : '-'}</td>` : ''}</tr>`;
+        const slaColor = (ac.pastSla || 0) > 0 ? "color:#C62828;" : "";
+        html += `<tr>
+            <td style="${agentNameStyle}">${agent.split(" ")[0]}</td>
+            <td style="${agentCellStyle}">${ac.assigned || 0}</td>
+            <td style="${agentCellStyle}${slaColor}">${ac.pastSla || 0}</td>
+            <td style="${agentCellStyle}">${ac.handledToday || 0}</td>
+          </tr>`;
       }
     });
-
-    // Past SLA
-    html += `<tr><td style="${subH2}" colspan="${colSpan}">Past SLA</td></tr>`;
-    CONFIG.agents.forEach(agent => {
-      const ac = zendesk.agentCounts[agent];
-      if (ac) {
-        const pe = prevAgentEmail[agent] || {};
-        html += `<tr><td style="${colLabel}${agentRow}">${agent.split(" ")[0]}</td><td style="${colToday}color:${ac.pastSla > 0 ? '#C62828' : 'inherit'};">${ac.pastSla || 0}</td>${hasPrev ? `<td style="${colYest}color:#888;font-size:12px;">${pe.pastSla !== undefined ? pe.pastSla : '-'}</td>` : ''}</tr>`;
-      }
-    });
-
-    // Solved
-    html += `<tr><td style="${subH2}" colspan="${colSpan}">Solved</td></tr>`;
-    CONFIG.agents.forEach(agent => {
-      const ac = zendesk.agentCounts[agent];
-      if (ac) {
-        const pe = prevAgentEmail[agent] || {};
-        html += `<tr><td style="${colLabel}${agentRow}">${agent.split(" ")[0]}</td><td style="${colToday}">${ac.handledToday || 0}</td>${hasPrev ? `<td style="${colYest}color:#888;font-size:12px;">${pe.solved !== undefined ? pe.solved : '-'}</td>` : ''}</tr>`;
-      }
-    });
+    html += `</table>`;
   }
 
-  html += `</table></div>`;
+  html += `</div>`;
 
   // ── PHONE SECTION ──
   html += `
@@ -4759,54 +5001,40 @@ function sendDailyRecap(recipientOverride, skipSave) {
           <tr><td style="${colLabel}padding:4px 0;">Outbound Calls</td><td style="${colToday}font-weight:bold;">${aircall.totalOutbound}</td>${prevTd(prev.outboundCalls)}</tr>
           <tr><td style="${colLabel}padding:4px 0;">Avg Call Duration</td><td style="${colToday}font-weight:bold;">${formatSeconds(aircall.avgDuration || 0)}</td>${hasPrev && prev.avgCallDuration ? `<td style="${colYest}color:#888;font-size:12px;">${formatSeconds(prev.avgCallDuration)}</td>` : (hasPrev ? `<td style="${colYest}color:#AAA;font-size:12px;">-</td>` : '')}</tr>`;
 
-  // Per-agent phone breakdown integrated into same table with subheadings
+  html += `</table>`;
+
+  // Per-agent phone horizontal table
   if (aircall.agentStats) {
-    const prevAgentPhone = (hasPrev && prev.agentPhone) || {};
-    const pColSpan = hasPrev ? 3 : 2;
-    html += `<tr><td style="${subH1}" colspan="${pColSpan}">Per Agent</td></tr>`;
+    const agentHeaderStyle = `font-size:11px;color:#888;font-weight:bold;text-align:center;padding:4px 6px;border-bottom:1px solid #E1DFDD;`;
+    const agentNameStyle = `font-size:12px;padding:3px 0;font-weight:bold;`;
+    const agentCellStyle = `font-size:12px;text-align:center;padding:3px 6px;`;
 
-    // Inbound
-    html += `<tr><td style="${subH2}" colspan="${pColSpan}">Inbound</td></tr>`;
+    html += `
+        <div style="margin-top:12px;font-size:12px;color:${navy};font-weight:bold;border-top:1px solid #E1DFDD;padding-top:10px;">Per Agent</div>
+        <table style="width:100%;font-size:12px;border-collapse:collapse;margin-top:6px;">
+          <tr>
+            <td style="${agentHeaderStyle}text-align:left;"></td>
+            <td style="${agentHeaderStyle}">Inbound</td>
+            <td style="${agentHeaderStyle}">Outbound</td>
+            <td style="${agentHeaderStyle}">In Talk</td>
+            <td style="${agentHeaderStyle}">Out Talk</td>
+          </tr>`;
     CONFIG.agents.forEach(agent => {
       const as = aircall.agentStats[agent];
       if (as) {
-        const pp = prevAgentPhone[agent] || {};
-        html += `<tr><td style="${colLabel}${agentRow}">${agent.split(" ")[0]}</td><td style="${colToday}">${as.answered || 0}</td>${hasPrev ? `<td style="${colYest}color:#888;font-size:12px;">${pp.inbound !== undefined ? pp.inbound : '-'}</td>` : ''}</tr>`;
+        html += `<tr>
+            <td style="${agentNameStyle}">${agent.split(" ")[0]}</td>
+            <td style="${agentCellStyle}">${as.answered || 0}</td>
+            <td style="${agentCellStyle}">${as.outbound || 0}</td>
+            <td style="${agentCellStyle}">${formatTalkTime(as.inboundTalkTime || 0)}</td>
+            <td style="${agentCellStyle}">${formatTalkTime(as.outboundTalkTime || 0)}</td>
+          </tr>`;
       }
     });
-
-    // Outbound
-    html += `<tr><td style="${subH2}" colspan="${pColSpan}">Outbound</td></tr>`;
-    CONFIG.agents.forEach(agent => {
-      const as = aircall.agentStats[agent];
-      if (as) {
-        const pp = prevAgentPhone[agent] || {};
-        html += `<tr><td style="${colLabel}${agentRow}">${agent.split(" ")[0]}</td><td style="${colToday}">${as.outbound || 0}</td>${hasPrev ? `<td style="${colYest}color:#888;font-size:12px;">${pp.outbound !== undefined ? pp.outbound : '-'}</td>` : ''}</tr>`;
-      }
-    });
-
-    // In Talk
-    html += `<tr><td style="${subH2}" colspan="${pColSpan}">In Talk</td></tr>`;
-    CONFIG.agents.forEach(agent => {
-      const as = aircall.agentStats[agent];
-      if (as) {
-        const pp = prevAgentPhone[agent] || {};
-        html += `<tr><td style="${colLabel}${agentRow}">${agent.split(" ")[0]}</td><td style="${colToday}">${formatTalkTime(as.inboundTalkTime || 0)}</td>${hasPrev ? `<td style="${colYest}color:#888;font-size:12px;">${pp.inTalk ? formatTalkTime(pp.inTalk) : '-'}</td>` : ''}</tr>`;
-      }
-    });
-
-    // Out Talk
-    html += `<tr><td style="${subH2}" colspan="${pColSpan}">Out Talk</td></tr>`;
-    CONFIG.agents.forEach(agent => {
-      const as = aircall.agentStats[agent];
-      if (as) {
-        const pp = prevAgentPhone[agent] || {};
-        html += `<tr><td style="${colLabel}${agentRow}">${agent.split(" ")[0]}</td><td style="${colToday}">${formatTalkTime(as.outboundTalkTime || 0)}</td>${hasPrev ? `<td style="${colYest}color:#888;font-size:12px;">${pp.outTalk ? formatTalkTime(pp.outTalk) : '-'}</td>` : ''}</tr>`;
-      }
-    });
+    html += `</table>`;
   }
 
-  html += `</table></div>`;
+  html += `</div>`;
 
   // ── SMS SECTION ──
   if (sms.totalToday > 0) {
@@ -4881,25 +5109,17 @@ function sendDailyRecap(recipientOverride, skipSave) {
         <div style="margin-bottom:4px;">Email: Healthy = 0-5 tickets past ${zendesk.slaHours}h SLA · Watch = 6-10 past SLA · At Risk = 11+ past SLA</div>
         <div style="margin-bottom:4px;">Phone: Healthy = ${th.phoneAnswerRate.green}%+ answer rate · Watch = ${th.phoneAnswerRate.yellow}-${th.phoneAnswerRate.green - 1}% · At Risk = below ${th.phoneAnswerRate.yellow}%</div>
         <div style="margin-bottom:4px;">Social: Healthy = oldest unread DM under ${th.socialResponseTime.green / 60}h · Watch = ${th.socialResponseTime.green / 60}-${th.socialResponseTime.yellow / 60}h · At Risk = over ${th.socialResponseTime.yellow / 60}h</div>
-        <div style="margin-bottom:4px;">The "Yesterday" column shows the previous working day's end-of-day values for comparison.</div>
+        <div style="margin-bottom:4px;">The "${compLabel}" column shows the previous working day's end-of-day values for comparison.</div>
       </div>
       <div style="text-align:center;padding:8px 0;font-size:11px;color:#999;">
-        CS Command Center v2.0.0 · End of Day Summary · ${dateStr}
+        CS Command Center v2.3.0 · End of Day Summary · ${dateStr}
       </div>
     </div>
   </div>`;
 
-  // Send email
-  const subject = `CS End of Day Summary — ${Utilities.formatDate(now, tz, "MMM d")} — Email: ${healthLabels[emailHealth]} | Phone: ${healthLabels[phoneHealth]} | Social: ${healthLabels[socialHealth]}`;
-
-  GmailApp.sendEmail(recipients, subject, "View this email with HTML enabled.", {
-    htmlBody: html,
-    name: "CS Command Center",
-  });
-
-  Logger.log("End of day summary sent to: " + recipients);
-
-  // Save today's snapshot for tomorrow's comparison
+  // ── SAVE DATA FIRST (before email send) ──
+  // This ensures snapshot + metrics log persist even if the email send fails,
+  // preventing stale comparison dates (e.g., the May 26 crash that caused Fri 5/22 to show on May 27).
   const snapshot = {
     date: Utilities.formatDate(now, tz, "yyyy-MM-dd"),
     // Email
@@ -4931,6 +5151,47 @@ function sendDailyRecap(recipientOverride, skipSave) {
     phoneCsatPct: postCall.score,
     phoneCsatResponses: postCall.total || 0,
   };
+
+  // ── Per-agent CSAT attribution ──
+  // Email CSAT: match Nicereply response ticket_id to Zendesk ticket assignee
+  const recapAgentEmailCsat = {};
+  CONFIG.agents.forEach(a => { recapAgentEmailCsat[a] = { satisfied: 0, total: 0, tickets: [] }; });
+  if (csat && csat.responses) {
+    csat.responses.forEach(r => {
+      if (!r.ticketId) return;
+      // Find which agent owns this ticket from the fetched ticket list
+      const ticket = (zendesk.tickets || []).find(t => String(t.id) === String(r.ticketId));
+      if (!ticket) return;
+      const matched = CONFIG.agents.find(ca => {
+        const parts = ca.toLowerCase().split(/\s+/);
+        const tLower = (ticket.assignee || "").toLowerCase();
+        return ca === ticket.assignee || parts.some(p => p.length > 1 && tLower.split(/\s+/).some(ap => ap === p));
+      });
+      if (matched) {
+        recapAgentEmailCsat[matched].total++;
+        if (r.satisfied) recapAgentEmailCsat[matched].satisfied++;
+        recapAgentEmailCsat[matched].tickets.push({ ticketId: r.ticketId, score: r.score, satisfied: r.satisfied });
+      }
+    });
+  }
+
+  // Phone CSAT: match by agent name in PostCall responses
+  const recapAgentPhoneCsat = {};
+  CONFIG.agents.forEach(a => { recapAgentPhoneCsat[a] = { satisfied: 0, total: 0 }; });
+  if (postCall && postCall.responses) {
+    postCall.responses.forEach(r => {
+      const matched = CONFIG.agents.find(a => {
+        const parts = a.toLowerCase().split(/\s+/);
+        const rParts = (r.agent || "").toLowerCase().split(/\s+/);
+        return parts[0] === rParts[0] || (parts[1] && rParts[1] && parts[1] === rParts[1]);
+      });
+      if (matched) {
+        recapAgentPhoneCsat[matched].total++;
+        if (r.satisfied) recapAgentPhoneCsat[matched].satisfied++;
+      }
+    });
+  }
+
   // Per-agent snapshots
   CONFIG.agents.forEach(agent => {
     const ac = zendesk.agentCounts ? zendesk.agentCounts[agent] : null;
@@ -4955,7 +5216,7 @@ function sendDailyRecap(recipientOverride, skipSave) {
   }
 
   // ── Append to Daily Metrics Log sheet (powers weekly/monthly summaries) ──
-  if (skipSave) return; // skip metrics log in test mode
+  if (!skipSave) {
   logDailyMetrics({
     date: Utilities.formatDate(now, tz, "yyyy-MM-dd"),
     dayOfWeek: Utilities.formatDate(now, tz, "EEEE"),
@@ -4983,15 +5244,31 @@ function sendDailyRecap(recipientOverride, skipSave) {
     csatSatisfied: csat.satisfied || 0,
     phoneCsatPct: postCall.score,
     phoneCsatResponses: postCall.total || 0,
+    // Per-agent CSAT
+    agentEmailCsatSat: CONFIG.agents.map(a => recapAgentEmailCsat[a].satisfied),
+    agentEmailCsatTot: CONFIG.agents.map(a => recapAgentEmailCsat[a].total),
+    agentPhoneCsatSat: CONFIG.agents.map(a => recapAgentPhoneCsat[a].satisfied),
+    agentPhoneCsatTot: CONFIG.agents.map(a => recapAgentPhoneCsat[a].total),
     unreadDMs: metaUnread,
     smsInbound: sms.inbound || 0,
     smsOutbound: sms.outbound || 0,
   });
+  } // end if (!skipSave)
 
   // Update Health Trends tab (historical chart of health statuses)
   try { updateHealthTrends(); } catch (e) {
     Logger.log("Health Trends update failed (non-fatal): " + e.toString());
   }
+
+  // ── SEND EMAIL (after data is safely persisted) ──
+  const subject = `CS AI Recap — Daily — ${Utilities.formatDate(now, tz, "MMM d")} — Email: ${healthLabels[emailHealth]} | Phone: ${healthLabels[phoneHealth]} | Social: ${healthLabels[socialHealth]}`;
+
+  GmailApp.sendEmail(recipients, subject, "View this email with HTML enabled.", {
+    htmlBody: html,
+    name: "CS Command Center",
+  });
+
+  Logger.log("End of day summary sent to: " + recipients);
 }
 
 // ─── DAILY METRICS LOG ───
@@ -5016,6 +5293,11 @@ const METRICS_LOG_HEADERS = [
   ...CONFIG.agents.map(a => "Out Talk: " + a.split(" ")[0]),
   "Email CSAT %", "Email CSAT Responses", "Email CSAT Satisfied",
   "Phone CSAT %", "Phone CSAT Responses",
+  // Per-agent CSAT (satisfied / total pairs)
+  ...CONFIG.agents.map(a => "Email CSAT Sat: " + a.split(" ")[0]),
+  ...CONFIG.agents.map(a => "Email CSAT Tot: " + a.split(" ")[0]),
+  ...CONFIG.agents.map(a => "Phone CSAT Sat: " + a.split(" ")[0]),
+  ...CONFIG.agents.map(a => "Phone CSAT Tot: " + a.split(" ")[0]),
   "Unread DMs", "SMS Inbound", "SMS Outbound",
 ];
 
@@ -5082,6 +5364,11 @@ function logDailyMetrics(m) {
     m.csatSatisfied,
     m.phoneCsatPct !== null && m.phoneCsatPct !== undefined ? m.phoneCsatPct : "",
     m.phoneCsatResponses,
+    // Per-agent CSAT
+    ...(m.agentEmailCsatSat || CONFIG.agents.map(() => 0)),
+    ...(m.agentEmailCsatTot || CONFIG.agents.map(() => 0)),
+    ...(m.agentPhoneCsatSat || CONFIG.agents.map(() => 0)),
+    ...(m.agentPhoneCsatTot || CONFIG.agents.map(() => 0)),
     m.unreadDMs,
     m.smsInbound,
     m.smsOutbound,
@@ -5459,7 +5746,7 @@ function sendWeeklySummary(now, tz, recipientOverride) {
   let html = `
   <div style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto;color:#1D1D1D;">
     <div style="background:${navy};color:#fff;padding:16px 24px;border-radius:8px 8px 0 0;">
-      <h1 style="margin:0;font-size:20px;">CS Command Center — Weekly Summary</h1>
+      <h1 style="margin:0;font-size:20px;">CS AI Recap — Weekly</h1>
       <p style="margin:4px 0 0;font-size:13px;color:#C3D3D7;">${weekLabel} (${curr.days} working days)</p>
     </div>
     <div style="padding:20px 24px;">`;
@@ -5570,15 +5857,28 @@ function sendWeeklySummary(now, tz, recipientOverride) {
     Logger.log("Health trends in weekly email failed (non-fatal): " + e.toString());
   }
 
+  // ── AI RECAP — WEEKLY TREND ANALYSIS ──
+  try {
+    const trendHtml = analyzeThemeTrends(thisWeek.start, thisWeek.end, "Week of " + weekLabel);
+    if (trendHtml) {
+      html += `<div style="background:#F8F7F6;border:1px solid ${borderColor};border-radius:6px;padding:16px;margin-top:16px;">
+        <h2 style="margin:0 0 12px;font-size:15px;color:${navy};">AI Recap — Weekly Theme Trends</h2>
+        <div style="font-size:13px;line-height:1.6;">${trendHtml}</div>
+      </div>`;
+    }
+  } catch (e) {
+    Logger.log("Weekly theme trend analysis failed (non-fatal): " + e.toString());
+  }
+
   // Footer
   html += `<div style="text-align:center;font-size:11px;color:#999;padding-top:8px;">
-      CS Command Center v2.0.0 · Weekly Summary · ${weekLabel}
+      CS Command Center v2.3.0 · Weekly Summary · ${weekLabel}
       ${prev ? '<br>Comparison: ' + prevWeekLabel : '<br>No prior week data available for comparison'}
     </div>
     </div>
   </div>`;
 
-  const subject = `CS Weekly Summary — ${weekLabel} — Solved: ${curr.totalSolved} · Avg Open: ${curr.avgOpenTickets} · Answer Rate: ${curr.avgAnswerRate}%`;
+  const subject = `CS AI Recap — Weekly — ${weekLabel} — Solved: ${curr.totalSolved} · Avg Open: ${curr.avgOpenTickets} · Answer Rate: ${curr.avgAnswerRate}%`;
 
   GmailApp.sendEmail(recipients, subject, "View this email with HTML enabled.", {
     htmlBody: html,
@@ -5655,7 +5955,7 @@ function sendMonthlySummary(now, tz, recipientOverride) {
   let html = `
   <div style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto;color:#1D1D1D;">
     <div style="background:${navy};color:#fff;padding:16px 24px;border-radius:8px 8px 0 0;">
-      <h1 style="margin:0;font-size:20px;">CS Command Center — Monthly Summary</h1>
+      <h1 style="margin:0;font-size:20px;">CS AI Recap — Monthly</h1>
       <p style="margin:4px 0 0;font-size:13px;color:#C3D3D7;">${monthLabel} (${curr.days} working days)</p>
     </div>
     <div style="padding:20px 24px;">`;
@@ -5758,15 +6058,31 @@ function sendMonthlySummary(now, tz, recipientOverride) {
     Logger.log("Health trends in monthly email failed (non-fatal): " + e.toString());
   }
 
+  // ── AI RECAP — MONTHLY TREND ANALYSIS ──
+  try {
+    const mStart = thisYear + "-" + String(thisMonth).padStart(2, "0") + "-01";
+    const mEndDay = new Date(thisYear, thisMonth, 0).getDate();
+    const mEnd = thisYear + "-" + String(thisMonth).padStart(2, "0") + "-" + String(mEndDay).padStart(2, "0");
+    const trendHtml = analyzeThemeTrends(mStart, mEnd, monthLabel);
+    if (trendHtml) {
+      html += `<div style="background:${cardBg};border:1px solid ${borderColor};border-radius:6px;padding:16px;margin-top:16px;">
+        <h2 style="margin:0 0 12px;font-size:15px;color:${navy};">AI Recap — Monthly Theme Trends</h2>
+        <div style="font-size:13px;line-height:1.6;">${trendHtml}</div>
+      </div>`;
+    }
+  } catch (e) {
+    Logger.log("Monthly theme trend analysis failed (non-fatal): " + e.toString());
+  }
+
   // Footer
   html += `<div style="text-align:center;font-size:11px;color:#999;padding-top:8px;">
-      CS Command Center v2.0.0 · Monthly Summary · ${monthLabel}
+      CS Command Center v2.3.0 · Monthly Summary · ${monthLabel}
       ${prev ? '<br>Comparison: ' + prevMonthLabel + ' (' + prev.days + ' working days)' : '<br>No prior month data available for comparison'}
     </div>
     </div>
   </div>`;
 
-  const subject = `CS Monthly Summary — ${monthLabel} — Solved: ${curr.totalSolved} · Avg Open: ${curr.avgOpenTickets} · Answer Rate: ${curr.avgAnswerRate}%`;
+  const subject = `CS AI Recap — Monthly — ${monthLabel} — Solved: ${curr.totalSolved} · Avg Open: ${curr.avgOpenTickets} · Answer Rate: ${curr.avgAnswerRate}%`;
 
   GmailApp.sendEmail(recipients, subject, "View this email with HTML enabled.", {
     htmlBody: html,
@@ -5975,6 +6291,64 @@ function updateAgentDashboards(zendesk, aircall, csat, postCall) {
   const totalOutbound = aircall.totalOutbound || 0;
   const missedDetails = aircall.missedCallDetails || [];
 
+  // ─── "Last Week" data from Daily Metrics Log (prior Mon-Fri) ───
+  const today = new Date(Utilities.formatDate(now, tz, "yyyy-MM-dd") + "T12:00:00");
+  const todayDow = today.getDay(); // 0=Sun ... 6=Sat
+
+  // Find prior Monday: go back to this Monday, then subtract 7 days
+  const thisMon = new Date(today);
+  thisMon.setDate(today.getDate() - ((todayDow + 6) % 7)); // this week's Monday
+  const lastMon = new Date(thisMon);
+  lastMon.setDate(thisMon.getDate() - 7);
+  const lastFri = new Date(lastMon);
+  lastFri.setDate(lastMon.getDate() + 4);
+
+  const lwStart = Utilities.formatDate(lastMon, tz, "yyyy-MM-dd");
+  const lwEnd = Utilities.formatDate(lastFri, tz, "yyyy-MM-dd");
+  const lwLabel = Utilities.formatDate(lastMon, tz, "M/d") + " - " + Utilities.formatDate(lastFri, tz, "M/d");
+
+  let lwRows = [];
+  try { lwRows = readMetricsLog(lwStart, lwEnd); } catch (e) {
+    Logger.log("Last week metrics read failed: " + e);
+  }
+
+  // Aggregate per-agent last-week data
+  const lwAgentData = {};
+  agents.forEach((agent, idx) => {
+    const firstName = agent.split(" ")[0];
+    const solved = lwRows.reduce((s, r) => s + (Number(r["Solved: " + firstName]) || 0), 0);
+    const inbound = lwRows.reduce((s, r) => s + (Number(r["In: " + firstName]) || 0), 0);
+    const inTalk = lwRows.reduce((s, r) => s + (Number(r["In Talk: " + firstName]) || 0), 0);
+    const outbound = lwRows.reduce((s, r) => s + (Number(r["Out: " + firstName]) || 0), 0);
+    const outTalk = lwRows.reduce((s, r) => s + (Number(r["Out Talk: " + firstName]) || 0), 0);
+    const emailCsatSat = lwRows.reduce((s, r) => s + (Number(r["Email CSAT Sat: " + firstName]) || 0), 0);
+    const emailCsatTot = lwRows.reduce((s, r) => s + (Number(r["Email CSAT Tot: " + firstName]) || 0), 0);
+    const phoneCsatSat = lwRows.reduce((s, r) => s + (Number(r["Phone CSAT Sat: " + firstName]) || 0), 0);
+    const phoneCsatTot = lwRows.reduce((s, r) => s + (Number(r["Phone CSAT Tot: " + firstName]) || 0), 0);
+    lwAgentData[agent] = { solved, inbound, inTalk, outbound, outTalk, emailCsatSat, emailCsatTot, phoneCsatSat, phoneCsatTot };
+  });
+
+  // Team averages for last week
+  function lwTeamAvg(field) {
+    const vals = agents.map(a => lwAgentData[a][field]);
+    if (vals.length === 0) return 0;
+    return Math.round(vals.reduce((a, b) => a + b, 0) / vals.length * 10) / 10;
+  }
+  const lwTeamAvgs = {
+    solved: lwTeamAvg("solved"),
+    inbound: lwTeamAvg("inbound"),
+    inTalk: lwTeamAvg("inTalk"),
+    outbound: lwTeamAvg("outbound"),
+    outTalk: lwTeamAvg("outTalk"),
+  };
+  // Team CSAT averages (aggregate all, not per-agent avg)
+  const lwTeamEmailCsatSat = agents.reduce((s, a) => s + lwAgentData[a].emailCsatSat, 0);
+  const lwTeamEmailCsatTot = agents.reduce((s, a) => s + lwAgentData[a].emailCsatTot, 0);
+  const lwTeamPhoneCsatSat = agents.reduce((s, a) => s + lwAgentData[a].phoneCsatSat, 0);
+  const lwTeamPhoneCsatTot = agents.reduce((s, a) => s + lwAgentData[a].phoneCsatTot, 0);
+
+  const hasLastWeekData = lwRows.length > 0;
+
   // ─── Write each agent's sheet ───
   agents.forEach(agent => {
     const sheetId = agentSheets[agent];
@@ -6114,7 +6488,7 @@ function updateAgentDashboards(zendesk, aircall, csat, postCall) {
     // ════════════════════════════════════════
     sectionHeader("Email (Zendesk)");
     colHeaders();
-    metricRow("Assigned Tickets", me.assigned, teamAvg.assigned, "num");
+    metricRow("New+Open Assigned Tickets", me.assigned, teamAvg.assigned, "num");
     metricRow("Past SLA", me.pastSla, teamAvg.pastSla, "num", { highlight: "lower" });
     metricRow("Solved Today", me.solved, teamAvg.solved, "num", { highlight: "higher" });
 
@@ -6222,6 +6596,117 @@ function updateAgentDashboards(zendesk, aircall, csat, postCall) {
     const pcTeamPct = pcAllTotal > 0 ? Math.round(pcAllSat / pcAllTotal * 100) : null;
     metricRow("Phone CSAT (24h)", pcPct, pcTeamPct, "pct", { highlight: "higher" });
 
+    // ─── CSAT Ticket Details (email CSAT with hyperlinks) ───
+    const myEmailCsatResponses = (csat && csat.responses || []).filter(r => {
+      if (!r.ticketId) return false;
+      const ticket = (zendesk.tickets || []).find(t => String(t.id) === String(r.ticketId));
+      if (!ticket) return false;
+      const matched = agents.find(ca => {
+        const parts = ca.toLowerCase().split(/\s+/);
+        const tLower = (ticket.assignee || "").toLowerCase();
+        return ca === ticket.assignee || parts.some(p => p.length > 1 && tLower.split(/\s+/).some(ap => ap === p));
+      });
+      return matched === agent;
+    });
+    const myPhoneCsatResponses = (postCall && postCall.responses || []).filter(r => {
+      const matched = agents.find(a => {
+        const parts = a.toLowerCase().split(/\s+/);
+        const rParts = (r.agent || "").toLowerCase().split(/\s+/);
+        return parts[0] === rParts[0] || (parts[1] && rParts[1] && parts[1] === rParts[1]);
+      });
+      return matched === agent;
+    });
+    const allCsatForAgent = [
+      ...myEmailCsatResponses.map(r => ({ type: "Email", ticketId: r.ticketId, score: r.score, maxScore: r.maxScore, customer: r.email || "Unknown", time: r.timeStr })),
+      ...myPhoneCsatResponses.map(r => ({ type: "Phone", ticketId: null, score: r.score, maxScore: r.maxScore, customer: r.customer || "Unknown", time: r.timeStr })),
+    ];
+    if (allCsatForAgent.length > 0) {
+      sheet.setRowHeight(row, 6);
+      sheet.getRange(row, 1, 1, leftCols).setBackground(bg);
+      row++;
+      sheet.setRowHeight(row, 22);
+      sheet.getRange(row, 1, 1, leftCols).merge()
+        .setValue("Your CSAT Reviews (24h)")
+        .setFontColor(navy).setFontWeight("bold").setFontSize(10).setFontFamily("Arial").setBackground(bg);
+      row++;
+      // Header
+      sheet.setRowHeight(row, 20);
+      ["Type", "Ticket", "Score", "Customer", "Time"].forEach((h, ci) => {
+        sheet.getRange(row, ci + 1).setValue(h)
+          .setFontColor(dimFg).setFontSize(9).setFontWeight("bold").setFontFamily("Arial").setBackground(bg);
+      });
+      sheet.getRange(row, 1, 1, leftCols).setBorder(false, false, true, false, false, false, borderColor, SpreadsheetApp.BorderStyle.SOLID);
+      row++;
+      allCsatForAgent.slice(0, 10).forEach(c => {
+        sheet.setRowHeight(row, 20);
+        sheet.getRange(row, 1).setValue(c.type)
+          .setFontSize(9).setFontFamily("Arial").setFontColor(labelFg).setBackground(bg);
+        if (c.ticketId) {
+          sheet.getRange(row, 2).setFormula(`=HYPERLINK("${zdUrl}${c.ticketId}","${c.ticketId}")`)
+            .setFontSize(9).setFontColor("#1155CC").setFontFamily("Arial").setBackground(bg);
+        } else {
+          sheet.getRange(row, 2).setValue("-")
+            .setFontSize(9).setFontFamily("Arial").setFontColor(dimFg).setBackground(bg);
+        }
+        const scoreColor = c.score >= 4 ? green : (c.score >= 3 ? amber : red);
+        sheet.getRange(row, 3).setValue(c.score + "/" + c.maxScore)
+          .setFontSize(9).setFontFamily("Arial").setFontWeight("bold").setFontColor(scoreColor).setBackground(bg);
+        const custShort = (c.customer || "").length > 18 ? c.customer.substring(0, 15) + "..." : c.customer;
+        sheet.getRange(row, 4).setValue(custShort)
+          .setFontSize(9).setFontFamily("Arial").setFontColor(labelFg).setBackground(bg);
+        sheet.getRange(row, 5).setValue(c.time || "")
+          .setFontSize(9).setFontFamily("Arial").setFontColor(dimFg).setBackground(bg);
+        row++;
+      });
+    }
+
+    // ─── LAST WEEK SECTION ───
+    if (hasLastWeekData) {
+      const lw = lwAgentData[agent];
+      sheet.setRowHeight(row, 10);
+      sheet.getRange(row, 1, 1, leftCols).setBackground(bg);
+      row++;
+
+      // Section header
+      sheet.getRange(row, 1, 1, leftCols).merge()
+        .setValue("Last Week (" + lwLabel + ")")
+        .setBackground(sectionBg).setFontColor(navy)
+        .setFontWeight("bold").setFontSize(12).setFontFamily("Arial")
+        .setVerticalAlignment("middle");
+      sheet.getRange(row, 1, 1, leftCols).setBorder(true, false, true, false, false, false, borderColor, SpreadsheetApp.BorderStyle.SOLID);
+      row++;
+
+      // Column headers
+      sheet.setRowHeight(row, 24);
+      sheet.getRange(row, 1).setValue("").setBackground(bg);
+      sheet.getRange(row, 2).setValue("You")
+        .setBackground(bg).setFontColor(navy).setFontWeight("bold")
+        .setFontSize(10).setHorizontalAlignment("right").setFontFamily("Arial");
+      sheet.getRange(row, 3).setValue("Team Avg")
+        .setBackground(bg).setFontColor(dimFg).setFontWeight("bold")
+        .setFontSize(10).setHorizontalAlignment("right").setFontFamily("Arial");
+      sheet.getRange(row, 4, 1, 2).setBackground(bg).setValue("");
+      sheet.getRange(row, 1, 1, leftCols).setBorder(false, false, true, false, false, false, borderColor, SpreadsheetApp.BorderStyle.SOLID);
+      row++;
+
+      // Reuse metricRow for last week data
+      metricRow("Tickets Solved", lw.solved, lwTeamAvgs.solved, "num", { highlight: "higher" });
+      metricRow("Inbound Answered", lw.inbound, lwTeamAvgs.inbound, "num", { highlight: "higher" });
+      metricRow("Inbound Talk Time", lw.inTalk, lwTeamAvgs.inTalk, "talk", { highlight: "higher" });
+      metricRow("Outbound Calls", lw.outbound, lwTeamAvgs.outbound, "num", { highlight: "higher" });
+      metricRow("Outbound Talk Time", lw.outTalk, lwTeamAvgs.outTalk, "talk", { highlight: "higher" });
+
+      // Email CSAT for last week
+      const lwEcPct = lw.emailCsatTot > 0 ? Math.round(lw.emailCsatSat / lw.emailCsatTot * 100) : null;
+      const lwEcTeamPct = lwTeamEmailCsatTot > 0 ? Math.round(lwTeamEmailCsatSat / lwTeamEmailCsatTot * 100) : null;
+      metricRow("Email CSAT", lwEcPct, lwEcTeamPct, "pct", { highlight: "higher" });
+
+      // Phone CSAT for last week
+      const lwPcPct = lw.phoneCsatTot > 0 ? Math.round(lw.phoneCsatSat / lw.phoneCsatTot * 100) : null;
+      const lwPcTeamPct = lwTeamPhoneCsatTot > 0 ? Math.round(lwTeamPhoneCsatSat / lwTeamPhoneCsatTot * 100) : null;
+      metricRow("Phone CSAT", lwPcPct, lwPcTeamPct, "pct", { highlight: "higher" });
+    }
+
     const leftEndRow = row; // track where left column ends
 
     // ════════════════════════════════════════
@@ -6303,7 +6788,7 @@ function updateAgentDashboards(zendesk, aircall, csat, postCall) {
     const footerRow = maxRow + 1;
     sheet.setRowHeight(footerRow, 22);
     sheet.getRange(footerRow, 1, 1, totalCols).merge()
-      .setValue(`CS Command Center v2.0.0  ·  ${dateStr}  ·  Team avg = average across ${agents.length} agents`)
+      .setValue(`CS Command Center v2.3.0  ·  ${dateStr}  ·  Team avg = average across ${agents.length} agents`)
       .setFontColor(dimFg).setFontSize(8).setFontStyle("italic")
       .setHorizontalAlignment("center").setBackground(bg).setFontFamily("Arial");
 
@@ -6639,7 +7124,7 @@ function updateHealthTrends() {
   const footerRow = 46; // below all 3 charts + legends
   const footerCols = 10; // cols H (8) through Q (17)
   const footerLines = [
-    `CS Command Center v2.0.0  ·  Health Trends  ·  Business days only (Mon-Fri, weekends excluded)`,
+    `CS Command Center v2.3.0  ·  Health Trends  ·  Business days only (Mon-Fri, weekends excluded)`,
     `Email: Healthy = 0-5 past SLA, Watch = 6-10 past SLA, At Risk = 11+ past SLA`,
     `Phone: Healthy = answer rate >= ${th.phoneAnswerRate.green}%, Watch = ${th.phoneAnswerRate.yellow}-${th.phoneAnswerRate.green - 1}%, At Risk = < ${th.phoneAnswerRate.yellow}%`,
     `Social: Healthy = oldest unread DM <= ${th.socialResponseTime.green / 60}h, Watch = ${th.socialResponseTime.green / 60}-${th.socialResponseTime.yellow / 60}h, At Risk = > ${th.socialResponseTime.yellow / 60}h`,
@@ -6975,10 +7460,14 @@ function backfillOneDay() {
     Logger.log("Aircall backfill error: " + e);
   }
 
-  // ── Nicereply: CSAT for that day ──
+  // ── Nicereply: CSAT for that day (team + per-agent) ──
   let csatPct = "";
   let csatResponses = 0;
   let csatSatisfied = 0;
+  const bfAgentEmailCsatSat = CONFIG.agents.map(() => 0);
+  const bfAgentEmailCsatTot = CONFIG.agents.map(() => 0);
+  const bfAgentPhoneCsatSat = CONFIG.agents.map(() => 0);
+  const bfAgentPhoneCsatTot = CONFIG.agents.map(() => 0);
   try {
     const nrToken = props.getProperty("NICEREPLY_TOKEN");
     if (nrToken) {
@@ -7000,19 +7489,96 @@ function backfillOneDay() {
       }
 
       const CSAT_QID = "86bae330-e8bc-4fa3-9af9-91eb2459d348";
-      let satisfied = 0;
-      allResponses.forEach(r => {
+      // Parse scores from each response
+      const parsed = allResponses.map(r => {
         const answers = r.answers || [];
         const csatAnswer = answers.find(a => a.question_id === CSAT_QID) || answers.find(a => a.question_type === "SCALE");
         const score = csatAnswer && csatAnswer.scale ? csatAnswer.scale.value : 0;
-        if (score >= 4) satisfied++;
+        return { ticketId: r.ticket_id || "", score, satisfied: score >= 4 };
       });
-      csatResponses = allResponses.length;
-      csatSatisfied = satisfied;
+
+      csatResponses = parsed.length;
+      csatSatisfied = parsed.filter(p => p.satisfied).length;
       csatPct = csatResponses > 0 ? Math.round((csatSatisfied / csatResponses) * 100) : "";
+
+      // Per-agent email CSAT: look up ticket assignees in Zendesk
+      const ticketIdsForCsat = parsed.map(p => p.ticketId).filter(Boolean);
+      if (ticketIdsForCsat.length > 0) {
+        const ticketAssignees = {};
+        for (let i = 0; i < ticketIdsForCsat.length; i += 100) {
+          const batch = ticketIdsForCsat.slice(i, i + 100).join(",");
+          const tUrl = `https://${subdomain}.zendesk.com/api/v2/tickets/show_many.json?ids=${batch}`;
+          const tResp = UrlFetchApp.fetch(tUrl, zdOpts);
+          if (tResp.getResponseCode() === 200) {
+            const tData = JSON.parse(tResp.getContentText());
+            // Need user names for assignees
+            const assigneeIds = new Set();
+            (tData.tickets || []).forEach(t => { if (t.assignee_id) assigneeIds.add(t.assignee_id); });
+            const userNames = {};
+            if (assigneeIds.size > 0) {
+              const uUrl = `https://${subdomain}.zendesk.com/api/v2/users/show_many.json?ids=${[...assigneeIds].join(",")}`;
+              const uResp = UrlFetchApp.fetch(uUrl, zdOpts);
+              if (uResp.getResponseCode() === 200) {
+                (JSON.parse(uResp.getContentText()).users || []).forEach(u => {
+                  userNames[u.id] = u.name || "";
+                });
+              }
+            }
+            (tData.tickets || []).forEach(t => {
+              ticketAssignees[t.id] = userNames[t.assignee_id] || "";
+            });
+          }
+        }
+        // Attribute to agents
+        parsed.forEach(p => {
+          if (!p.ticketId) return;
+          const assigneeName = ticketAssignees[p.ticketId] || "";
+          if (!assigneeName) return;
+          const idx = CONFIG.agents.findIndex(ca => {
+            const parts = ca.toLowerCase().split(/\s+/);
+            const tLower = assigneeName.toLowerCase();
+            return ca === assigneeName || parts.some(pt => pt.length > 1 && tLower.split(/\s+/).some(ap => ap === pt));
+          });
+          if (idx >= 0) {
+            bfAgentEmailCsatTot[idx]++;
+            if (p.satisfied) bfAgentEmailCsatSat[idx]++;
+          }
+        });
+      }
     }
   } catch (e) {
     Logger.log("Nicereply backfill error: " + e);
+  }
+
+  // ── PostCall CSAT for that day (per-agent) ──
+  try {
+    const pcSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("PostCall Log");
+    if (pcSheet && pcSheet.getLastRow() > 1) {
+      const pcData = pcSheet.getRange(2, 1, pcSheet.getLastRow() - 1, 12).getValues();
+      const dayStart = new Date(nextDate + "T00:00:00");
+      const dayEnd = new Date(nextDatePlusOne + "T00:00:00");
+      pcData.forEach(row => {
+        const ts = new Date(row[0]);
+        if (ts < dayStart || ts >= dayEnd) return;
+        if (String(row[1] || "") !== "survey-completed") return;
+        const agentName = String(row[4] || "");
+        const excluded = CONFIG.excludePostCallAgents.some(ex => agentName.toLowerCase().includes(ex.toLowerCase()));
+        if (excluded) return;
+        const csatScore = Number(row[2]) || 0;
+        if (!csatScore) return;
+        const idx = CONFIG.agents.findIndex(a => {
+          const parts = a.toLowerCase().split(/\s+/);
+          const rParts = agentName.toLowerCase().split(/\s+/);
+          return parts[0] === rParts[0] || (parts[1] && rParts[1] && parts[1] === rParts[1]);
+        });
+        if (idx >= 0) {
+          bfAgentPhoneCsatTot[idx]++;
+          if (csatScore >= 4) bfAgentPhoneCsatSat[idx]++;
+        }
+      });
+    }
+  } catch (e) {
+    Logger.log("PostCall CSAT backfill error: " + e);
   }
 
   // ── Log the row ──
@@ -7041,8 +7607,12 @@ function backfillOneDay() {
     csatPct: csatPct,
     csatResponses: csatResponses,
     csatSatisfied: csatSatisfied,
-    phoneCsatPct: "",       // post-call CSAT not easily backfillable
+    phoneCsatPct: "",       // team phone CSAT not easily backfillable
     phoneCsatResponses: 0,
+    agentEmailCsatSat: bfAgentEmailCsatSat,
+    agentEmailCsatTot: bfAgentEmailCsatTot,
+    agentPhoneCsatSat: bfAgentPhoneCsatSat,
+    agentPhoneCsatTot: bfAgentPhoneCsatTot,
     unreadDMs: "",          // can't reconstruct
     smsInbound: "",         // SMS log could be read, but skip for now
     smsOutbound: "",
@@ -7115,7 +7685,7 @@ function sendNonWorkingDaySnapshot(zendesk, meta, now, dateStr, tz, recipients) 
   let html = `
   <div style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto;color:#1D1D1D;">
     <div style="background:${navy};color:#fff;padding:16px 24px;border-radius:8px 8px 0 0;">
-      <h1 style="margin:0;font-size:20px;">CS Command Center — Non-Working Day Snapshot</h1>
+      <h1 style="margin:0;font-size:20px;">CS AI Recap — Non-Working Day</h1>
       <p style="margin:4px 0 0;font-size:13px;color:#C3D3D7;">${dateStr}</p>
     </div>
 
@@ -7149,13 +7719,35 @@ function sendNonWorkingDaySnapshot(zendesk, meta, now, dateStr, tz, recipients) 
         </table>
       </div>
 
+`;
+
+  // Run AI Recap theme analysis for non-working days too
+  let dailyThemesHtml = "";
+  try {
+    const themesResult = analyzeDailyThemes();
+    if (themesResult) {
+      dailyThemesHtml = typeof themesResult === "string" ? themesResult : themesResult.html;
+    }
+  } catch (e) {
+    Logger.log("Non-working day theme analysis failed (non-fatal): " + e.toString());
+  }
+
+  if (dailyThemesHtml) {
+    html += `
+      <div style="background:${cardBg};border:1px solid ${borderColor};border-radius:6px;padding:16px;margin-bottom:16px;">
+        <h2 style="margin:0 0 12px;font-size:15px;color:${navy};">AI Recap — Top 3 Themes</h2>
+        <div style="font-size:13px;line-height:1.6;">${dailyThemesHtml}</div>
+      </div>`;
+  }
+
+  html += `
       <div style="text-align:center;padding:16px 0 8px;font-size:11px;color:#999;">
-        CS Command Center v2.0.0 · Non-Working Day Snapshot · ${dateStr}
+        CS Command Center v2.3.0 · Non-Working Day · ${dateStr}
       </div>
     </div>
   </div>`;
 
-  const subject = `CS Non-Working Day Snapshot — ${Utilities.formatDate(now, tz, "MMM d")} — Open: ${zendesk.totalOpen} · VM: ${vmCount} · Unread DMs: ${metaUnread}`;
+  const subject = `CS AI Recap — Non-Working Day — ${Utilities.formatDate(now, tz, "MMM d")} — Open: ${zendesk.totalOpen} · VM: ${vmCount} · Unread DMs: ${metaUnread}`;
 
   GmailApp.sendEmail(recipients, subject, "View this email with HTML enabled.", {
     htmlBody: html,
