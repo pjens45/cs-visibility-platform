@@ -426,6 +426,10 @@ function fetchZendeskStatus() {
   const knownHandled = Object.values(handledToday).reduce((a, b) => a + b, 0);
   handledToday["Other"] = Math.max(0, totalHandledToday - knownHandled);
 
+  // Count tickets created today (for daily metrics log)
+  const createdQuery = `type:ticket created>=${todayStr} ${solvedExclusions}`;
+  const ticketsCreatedToday = zendeskSearchCount(createdQuery);
+
   // Find who the "Other" solvers are so we can label the row (e.g. "Other (Manager)")
   const otherSolverNames = new Set();
   if (handledToday["Other"] > 0) {
@@ -502,6 +506,7 @@ function fetchZendeskStatus() {
     tickets: filtered,
     flaggedTickets,
     totalHandledToday,
+    ticketsCreatedToday,
     // Top 10 longest-waiting tickets for the detail table
     longest10: filtered.slice(0, 10),
   };
@@ -1779,7 +1784,7 @@ You MUST respond with valid JSON only, no other text. Use this exact format:
 DAILY THEME DATA (${workRows.length} theme entries across ${totalWorkingDays} working days):
 ${themeSummaries}
 
-Identify the top 3 recurring trends or patterns from this period's daily themes. Rank by frequency and impact. Note if any theme is new/emerging vs persistent.`;
+Identify the top 3 recurring trends or patterns from this period's daily themes. Rank by frequency and impact. When mentioning ticket counts, say "tickets created" not just "tickets" so the reader knows these are new inbound contacts. Note if any theme is new/emerging vs persistent.`;
 
   try {
     const response = UrlFetchApp.fetch("https://api.anthropic.com/v1/messages", {
@@ -3903,7 +3908,7 @@ function _writeDashboardContent(ss, dash, zendesk, aircall, csat, postCall, sms,
 
   // Footer — version & goals
   dash.getRange(`A${lastRow}:Z${lastRow}`).merge()
-    .setValue(`CS Command Center v2.4.1  ·  Refreshes every 5 min  ·  Goal: reply within ${slaHours} business hours · answer ${CONFIG.thresholds.phoneAnswerRate.green}%+ inbound calls · Mon–Fri 6a–5p PST`)
+    .setValue(`CS Command Center v2.4.2  ·  Refreshes every 5 min  ·  Goal: reply within ${slaHours} business hours · answer ${CONFIG.thresholds.phoneAnswerRate.green}%+ inbound calls · Mon–Fri 6a–5p PST`)
     .setFontColor(gray).setFontSize(8).setFontStyle("italic")
     .setHorizontalAlignment("center").setBackground(bg);
 
@@ -5903,7 +5908,7 @@ function sendDailyRecap(recipientOverride, skipSave) {
         <div style="margin-bottom:4px;">The "${compLabel}" column shows the previous working day's end-of-day values for comparison.</div>
       </div>
       <div style="text-align:center;padding:8px 0;font-size:11px;color:#999;">
-        CS Command Center v2.4.1 · End of Day Summary · ${dateStr}
+        CS Command Center v2.4.2 · End of Day Summary · ${dateStr}
       </div>
     </div>
   </div>`;
@@ -6018,6 +6023,7 @@ function sendDailyRecap(recipientOverride, skipSave) {
     sasTickets: sasCount,
     openVoicemails: zendesk.openVoicemails || 0,
     aiAgentTickets: zendesk.aiAgentCount || 0,
+    ticketsCreated: zendesk.ticketsCreatedToday || "",
     solvedTotal: zendesk.totalHandledToday || 0,
     agentSolved: CONFIG.agents.map(a => (zendesk.agentCounts[a] || {}).handledToday || 0),
     answerRate: answerRateRounded,
@@ -6070,7 +6076,7 @@ function sendDailyRecap(recipientOverride, skipSave) {
 const METRICS_LOG_HEADERS = [
   "Date", "Day", "Open Tickets", "Unassigned", "On Hold", "Past SLA",
   "SAS Tickets", "Open Voicemails", "AI Agent Tickets",
-  "Solved Total",
+  "Tickets Created", "Solved Total",
   // Per-agent solved columns are dynamically named from CONFIG.agents
   // e.g. "Solved: AgentA", "Solved: AgentB", "Solved: AgentC"
   ...CONFIG.agents.map(a => "Solved: " + a.split(" ")[0]),
@@ -6138,6 +6144,7 @@ function logDailyMetrics(m) {
     m.sasTickets,
     m.openVoicemails,
     m.aiAgentTickets,
+    m.ticketsCreated !== undefined ? m.ticketsCreated : "",
     m.solvedTotal,
     ...m.agentSolved,          // per-agent solved (matches CONFIG.agents order)
     m.answerRate,
@@ -6230,6 +6237,7 @@ function aggregateMetrics(rows) {
     avgOnHold: avgNonEmpty("On Hold") !== null ? Math.round(avgNonEmpty("On Hold") * 10) / 10 : null,
     avgPastSla: avgNonEmpty("Past SLA") !== null ? Math.round(avgNonEmpty("Past SLA") * 10) / 10 : null,
     avgVoicemails: avgNonEmpty("Open Voicemails") !== null ? Math.round(avgNonEmpty("Open Voicemails") * 10) / 10 : null,
+    totalCreated: sum("Tickets Created"),
     totalSolved: sum("Solved Total"),
     agentSolved: CONFIG.agents.map(a => ({
       name: a,
@@ -6820,10 +6828,11 @@ function sendWeeklySummary(now, tz, recipientOverride) {
     <h2 style="margin:0 0 12px;font-size:15px;color:${navy};">Email (Zendesk)</h2>
     <table style="width:100%;font-size:13px;border-collapse:collapse;">
       ${headerRow}
+      <tr><td style="${colLabel}">Tickets Created</td><td style="${colThis}font-weight:bold;">${curr.totalCreated}</td>${prevCell(curr.totalCreated, prev ? prev.totalCreated : null, "")}</tr>
+      <tr><td style="${colLabel}">Tickets Solved</td><td style="${colThis}font-weight:bold;">${curr.totalSolved}</td>${prevCell(curr.totalSolved, prev ? prev.totalSolved : null, "")}</tr>
       <tr><td style="${colLabel}">Avg Open Tickets</td><td style="${colThis}font-weight:bold;">${curr.avgOpenTickets !== null ? curr.avgOpenTickets : '<span style="color:#AAA;font-weight:normal;">no data</span>'}</td>${prevCell(curr.avgOpenTickets, prev && prev.queueStateDays >= Math.ceil(prev.days / 2) ? prev.avgOpenTickets : null, "")}</tr>
       <tr><td style="${colLabel}">Avg Past SLA</td><td style="${colThis}font-weight:bold;${curr.avgPastSla !== null && curr.avgPastSla > 0 ? 'color:#C62828;' : ''}">${curr.avgPastSla !== null ? curr.avgPastSla : '<span style="color:#AAA;font-weight:normal;">no data</span>'}</td>${prevCell(curr.avgPastSla, prev && prev.queueStateDays >= Math.ceil(prev.days / 2) ? prev.avgPastSla : null, "")}</tr>
-      <tr><td style="${colLabel}">Avg Unassigned</td><td style="${colThis}font-weight:bold;">${curr.avgUnassigned !== null ? curr.avgUnassigned : '<span style="color:#AAA;font-weight:normal;">no data</span>'}</td>${prevCell(curr.avgUnassigned, prev && prev.queueStateDays >= Math.ceil(prev.days / 2) ? prev.avgUnassigned : null, "")}</tr>
-      <tr><td style="${colLabel}">Tickets Solved</td><td style="${colThis}font-weight:bold;">${curr.totalSolved}</td>${prevCell(curr.totalSolved, prev ? prev.totalSolved : null, "")}</tr>`;
+      <tr><td style="${colLabel}">Avg Unassigned</td><td style="${colThis}font-weight:bold;">${curr.avgUnassigned !== null ? curr.avgUnassigned : '<span style="color:#AAA;font-weight:normal;">no data</span>'}</td>${prevCell(curr.avgUnassigned, prev && prev.queueStateDays >= Math.ceil(prev.days / 2) ? prev.avgUnassigned : null, "")}</tr>`;
 
   html += `</table>`;
 
@@ -6916,7 +6925,7 @@ function sendWeeklySummary(now, tz, recipientOverride) {
 
   // Footer
   html += `<div style="text-align:center;font-size:11px;color:#999;padding-top:8px;">
-      CS Command Center v2.4.1 · Weekly Summary · ${weekLabel}
+      CS Command Center v2.4.2 · Weekly Summary · ${weekLabel}
       ${prev ? '<br>Comparison: ' + prevWeekLabel : '<br>No prior week data available for comparison'}
     </div>
     </div>
@@ -7127,7 +7136,7 @@ function sendMonthlySummary(now, tz, recipientOverride) {
 
   // Footer
   html += `<div style="text-align:center;font-size:11px;color:#999;padding-top:8px;">
-      CS Command Center v2.4.1 · Monthly Summary · ${monthLabel}
+      CS Command Center v2.4.2 · Monthly Summary · ${monthLabel}
       ${prev ? '<br>Comparison: ' + prevMonthLabel + ' (' + prev.days + ' working days)' : '<br>No prior month data available for comparison'}
     </div>
     </div>
@@ -7839,7 +7848,7 @@ function updateAgentDashboards(zendesk, aircall, csat, postCall) {
     const footerRow = maxRow + 1;
     sheet.setRowHeight(footerRow, 22);
     sheet.getRange(footerRow, 1, 1, totalCols).merge()
-      .setValue(`CS Command Center v2.4.1  ·  ${dateStr}  ·  Team avg = average across ${agents.length} agents`)
+      .setValue(`CS Command Center v2.4.2  ·  ${dateStr}  ·  Team avg = average across ${agents.length} agents`)
       .setFontColor(dimFg).setFontSize(8).setFontStyle("italic")
       .setHorizontalAlignment("center").setBackground(bg).setFontFamily("Arial");
 
@@ -8175,7 +8184,7 @@ function updateHealthTrends() {
   const footerRow = 46; // below all 3 charts + legends
   const footerCols = 10; // cols H (8) through Q (17)
   const footerLines = [
-    `CS Command Center v2.4.1  ·  Health Trends  ·  Business days only (Mon-Fri, weekends excluded)`,
+    `CS Command Center v2.4.2  ·  Health Trends  ·  Business days only (Mon-Fri, weekends excluded)`,
     `Email: Healthy = 0-5 past SLA, Watch = 6-10 past SLA, At Risk = 11+ past SLA`,
     `Phone: Healthy = answer rate >= ${th.phoneAnswerRate.green}%, Watch = ${th.phoneAnswerRate.yellow}-${th.phoneAnswerRate.green - 1}%, At Risk = < ${th.phoneAnswerRate.yellow}%`,
     `Social: Healthy = oldest unread DM <= ${th.socialResponseTime.green / 60}h, Watch = ${th.socialResponseTime.green / 60}-${th.socialResponseTime.yellow / 60}h, At Risk = > ${th.socialResponseTime.yellow / 60}h`,
@@ -8371,6 +8380,7 @@ function backfillOneDay() {
   // Apply same exclusion filters as the daily recap: no aircall, no internal testing, no auto-close, no AI Agent
   const solvedFilter = `-tags:aircall -tags:internal__testing -tags:auto_close -assignee:"AI Agent"`;
   const solvedTotal = zdCount(`type:ticket solved>=${nextDate} solved<${nextDatePlusOne} ${solvedFilter}`);
+  const ticketsCreated = zdCount(`type:ticket created>=${nextDate} created<${nextDatePlusOne} ${solvedFilter}`);
   const agentSolved = CONFIG.agents.map(a =>
     zdCount(`type:ticket solved>=${nextDate} solved<${nextDatePlusOne} ${solvedFilter} assignee:"${a}"`)
   );
@@ -8645,6 +8655,7 @@ function backfillOneDay() {
     sasTickets: "",         // can't reconstruct
     openVoicemails: "",     // can't reconstruct
     aiAgentTickets: "",     // can't reconstruct
+    ticketsCreated: ticketsCreated,
     solvedTotal: solvedTotal,
     agentSolved: agentSolved,
     agentInbound: agentIn,
@@ -8795,7 +8806,7 @@ function sendNonWorkingDaySnapshot(zendesk, meta, now, dateStr, tz, recipients) 
 
   html += `
       <div style="text-align:center;padding:16px 0 8px;font-size:11px;color:#999;">
-        CS Command Center v2.4.1 · Non-Working Day · ${dateStr}
+        CS Command Center v2.4.2 · Non-Working Day · ${dateStr}
       </div>
     </div>
   </div>`;
@@ -8857,6 +8868,7 @@ function cleanupDailyMetricsLog() {
 
   const smsInCol = headers.indexOf("SMS Inbound");
   const smsOutCol = headers.indexOf("SMS Outbound");
+  const ticketsCreatedCol = headers.indexOf("Tickets Created");
 
   const tz = Session.getScriptTimeZone();
 
@@ -8876,6 +8888,31 @@ function cleanupDailyMetricsLog() {
         row[phoneCsatCol] = phoneCsatData[dateStr].pct;
         row[phoneCsatRespCol] = phoneCsatData[dateStr].responses;
         Logger.log("Patched phone CSAT for " + dateStr + ": " + phoneCsatData[dateStr].pct + "% (" + phoneCsatData[dateStr].responses + " responses)");
+      }
+    }
+
+    // Patch Tickets Created by querying Zendesk if empty
+    if (ticketsCreatedCol >= 0) {
+      const existingCreated = row[ticketsCreatedCol];
+      if (existingCreated === "" || existingCreated === null || existingCreated === undefined) {
+        try {
+          const zdToken = props.getProperty("ZENDESK_TOKEN");
+          if (zdToken) {
+            const subdomain = CONFIG.zendesk.subdomain;
+            const zdAuth = "Basic " + Utilities.base64Encode(zdToken);
+            const nextDay = new Date(dateStr + "T12:00:00");
+            nextDay.setDate(nextDay.getDate() + 1);
+            const nextDayStr = nextDay.toISOString().split("T")[0];
+            const solvedFilter = `-tags:aircall -tags:internal__testing -tags:auto_close -assignee:"AI Agent"`;
+            const url = `https://${subdomain}.zendesk.com/api/v2/search/count.json?query=${encodeURIComponent("type:ticket created>=" + dateStr + " created<" + nextDayStr + " " + solvedFilter)}`;
+            const resp = UrlFetchApp.fetch(url, { method: "get", headers: { "Authorization": zdAuth, "Content-Type": "application/json" }, muteHttpExceptions: true });
+            if (resp.getResponseCode() === 200) {
+              const count = JSON.parse(resp.getContentText()).count || 0;
+              row[ticketsCreatedCol] = count;
+              Logger.log("Patched Tickets Created for " + dateStr + ": " + count);
+            }
+          }
+        } catch (e) { Logger.log("Tickets Created patch failed for " + dateStr + ": " + e); }
       }
     }
 
