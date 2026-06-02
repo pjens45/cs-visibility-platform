@@ -746,11 +746,15 @@ function analyzeDailyThemes() {
   const callTickets = tickets.filter(t => (t.tags || []).includes("aircall"));
 
   // Build email/web ticket summaries with full descriptions and ticket IDs
+  // Strip broken surrogate pairs and non-BMP chars that break JSON serialization
+  const sanitizeText = (str) => (str || "").replace(/[\uD800-\uDFFF]/g, "");
+
   const emailSummaries = emailTickets.map(t => {
     const tags = (t.tags || []).filter(tag => !tag.match(/^\d+$/)).slice(0, 8).join(", ");
     const channel = t.via && t.via.channel ? t.via.channel : "unknown";
-    const desc = (t.description || "").replace(/\n{3,}/g, "\n\n").substring(0, 800);
-    return `[#${t.id}] [${channel}] ${t.subject || "(no subject)"}${tags ? " (tags: " + tags + ")" : ""}\n${desc}`;
+    const desc = sanitizeText((t.description || "").replace(/\n{3,}/g, "\n\n").substring(0, 800));
+    const subj = sanitizeText(t.subject || "(no subject)");
+    return `[#${t.id}] [${channel}] ${subj}${tags ? " (tags: " + tags + ")" : ""}\n${desc}`;
   });
 
   // Build call summaries from ci- tags (these are AI-generated call intents)
@@ -1040,11 +1044,15 @@ function backfillThemesOneDay() {
   const emailTickets = tickets.filter(t => !(t.tags || []).includes("aircall"));
   const callTickets = tickets.filter(t => (t.tags || []).includes("aircall"));
 
+  // Strip broken surrogate pairs and non-BMP chars that break JSON serialization
+  const sanitizeText = (str) => (str || "").replace(/[\uD800-\uDFFF]/g, "");
+
   const emailSummaries = emailTickets.map(t => {
     const tags = (t.tags || []).filter(tag => !tag.match(/^\d+$/)).slice(0, 8).join(", ");
     const channel = t.via && t.via.channel ? t.via.channel : "unknown";
-    const desc = (t.description || "").replace(/\n{3,}/g, "\n\n").substring(0, 800);
-    return `[#${t.id}] [${channel}] ${t.subject || "(no subject)"}${tags ? " (tags: " + tags + ")" : ""}\n${desc}`;
+    const desc = sanitizeText((t.description || "").replace(/\n{3,}/g, "\n\n").substring(0, 800));
+    const subj = sanitizeText(t.subject || "(no subject)");
+    return `[#${t.id}] [${channel}] ${subj}${tags ? " (tags: " + tags + ")" : ""}\n${desc}`;
   });
 
   const callIntents = {};
@@ -1137,7 +1145,7 @@ Identify the top 3 themes from this day's activity.`;
         }
       }
     } else {
-      Logger.log("Theme backfill API error for " + nextDate + ": " + response.getResponseCode());
+      Logger.log("Theme backfill API error for " + nextDate + ": " + response.getResponseCode() + " — " + response.getContentText().substring(0, 500));
     }
   } catch (e) {
     Logger.log("Theme backfill failed for " + nextDate + ": " + e.toString());
@@ -1767,11 +1775,11 @@ function analyzeThemeTrends(startDate, endDate, periodLabel) {
 
   const systemPrompt = `You are analyzing support theme trends for Deako, a smart lighting company. You are reviewing the daily AI Recap theme data for a ${periodLabel} period (${totalWorkingDays} working days) to identify recurring patterns, emerging issues, and notable shifts.
 
-Use Deako's taxonomy vocabulary for consistency. Weekly/monthly trends should use PARENT-LEVEL categories since they aggregate across multiple days with varying specific symptoms. Keep trend names SHORT -- 3-5 words max. Good: "Connectivity > WiFi", "App Issues", "Hardware > Electrical". Bad: listing all sub-symptoms in the title. IMPORTANT: For app-related trends, always use "App Issues" in the trend name. Even if the source data says "Software/App", rename to "App Issues" in your output. Put the specific sub-symptom breakdown in the summary sentence, not the title.
+Use Deako's taxonomy vocabulary for consistency. Weekly/monthly trends should use PARENT-LEVEL categories since they aggregate across multiple days with varying specific symptoms. Keep trend names SHORT -- 3-5 words max. Good: "Connectivity > WiFi", "App Issues", "Hardware > Electrical". Bad: listing all sub-symptoms in the title. IMPORTANT: For app-related trends, always use "App Issues" in the trend name. Even if the source data says "Software/App", rename to "App Issues" in your output. Put the specific sub-symptom breakdown in the summary sentence, not the title. In the summary sentence, mention the most affected product type(s) when the data shows a clear pattern (e.g., "primarily affecting Smart Dimmers and Smart Switches").
 
 For frequency, use the total of ${totalWorkingDays} working days as the denominator (e.g., "appeared 3 of ${totalWorkingDays} working days").
 
-Integrate sentiment naturally into the summary sentence itself -- do NOT output sentiment as a separate field. Examples: "WiFi failures persist with customers reporting factual descriptions of connectivity issues." (neutral) or "Integration failures are generating increasing customer frustration, with several expressing exasperation at repeated failures." (frustrated). If tone is neutral, you don't need to call it out -- just write the summary normally. Only mention sentiment explicitly when there's notable frustration or anger.
+Integrate sentiment naturally into the summary sentence itself -- do NOT output sentiment as a separate field. Examples: "WiFi failures persist with customers reporting factual descriptions of connectivity issues." (neutral) or "Integration failures are generating increasing customer frustration, with several expressing exasperation at repeated failures." (frustrated). Always end the summary with a brief tone statement. For neutral: 'Customer tone is matter-of-fact' or 'Tone remains neutral throughout.' For frustrated: 'generating customer frustration' or 'with several customers expressing exasperation.' For mixed: 'Tone is mostly neutral with isolated frustration.' Every theme must include a tone indication.
 
 You MUST respond with valid JSON only, no other text. Use this exact format:
 [
@@ -2911,7 +2919,7 @@ function _writeDashboardContent(ss, dash, zendesk, aircall, csat, postCall, sms,
   dash.getRange(`K${k4}:P${k4}`).merge().setBackground(cardBg);
 
   dash.getRange(`R${k4}:S${k4}`).merge().setBackground(cardBg)
-    .setValue("Conversations (24h)")
+    .setValue("Active Conversations (24h)")
     .setFontSize(8).setFontColor(navy).setVerticalAlignment("top");
   dash.getRange(`T${k4}:Y${k4}`).merge().setBackground(cardBg);
 
@@ -3551,11 +3559,11 @@ function _writeDashboardContent(ss, dash, zendesk, aircall, csat, postCall, sms,
     });
   }
 
-  // ─── SMS Activity Today ───
+  // ─── Text Messages ───
   const smsData = sms || { totalToday: 0, inbound: 0, outbound: 0, agentStats: {}, messages: [] };
   paRow++; // spacer
   dash.getRange(`I${paRow}:P${paRow}`).merge()
-    .setValue("SMS Activity Today")
+    .setValue("Text Messages")
     .setBackground(navy).setFontColor("#FFFFFF")
     .setFontSize(11).setFontWeight("bold").setVerticalAlignment("middle");
   dash.setRowHeight(paRow, 26);
@@ -3675,12 +3683,12 @@ function _writeDashboardContent(ss, dash, zendesk, aircall, csat, postCall, sms,
   // ═══════════════════════════════════════════════
   let sRow = 10 + alertOffset + qiOffset;  // Social row counter (same starting row as phone/email)
 
-  // ─── Social — Meta Business Suite (Messenger + Instagram) ───
+  // ─── Social (Meta Business Suite) ───
   sRow++; // spacer to align with other sections
   dash.getRange(`R${sRow}:Z${sRow}`).merge()
     .setRichTextValue(
       SpreadsheetApp.newRichTextValue()
-        .setText("Social — Meta Business Suite")
+        .setText("Social (Meta Business Suite)")
         .setLinkUrl("https://business.facebook.com/latest/inbox/all")
         .build()
     )
@@ -3908,7 +3916,7 @@ function _writeDashboardContent(ss, dash, zendesk, aircall, csat, postCall, sms,
 
   // Footer — version & goals
   dash.getRange(`A${lastRow}:Z${lastRow}`).merge()
-    .setValue(`CS Command Center v2.4.2  ·  Refreshes every 5 min  ·  Goal: reply within ${slaHours} business hours · answer ${CONFIG.thresholds.phoneAnswerRate.green}%+ inbound calls · Mon–Fri 6a–5p PST`)
+    .setValue(`CS Intelligence · Command Center v2.5.4  ·  Refreshes every 5 min  ·  Goal: reply within ${slaHours} business hours · answer ${CONFIG.thresholds.phoneAnswerRate.green}%+ inbound calls · Mon-Fri 6a-5p PST`)
     .setFontColor(gray).setFontSize(8).setFontStyle("italic")
     .setHorizontalAlignment("center").setBackground(bg);
 
@@ -3918,7 +3926,7 @@ function _writeDashboardContent(ss, dash, zendesk, aircall, csat, postCall, sms,
     `Email status: Healthy = 0–5 tickets past SLA, Watch = 6–10 past SLA, At Risk = 11+ past SLA  ·  `
     + `Phone status: Healthy = answer rate ≥ ${CONFIG.thresholds.phoneAnswerRate.green}%, Watch = ${CONFIG.thresholds.phoneAnswerRate.yellow}–${CONFIG.thresholds.phoneAnswerRate.green - 1}%, At Risk = < ${CONFIG.thresholds.phoneAnswerRate.yellow}%  ·  `
     + `Social status: Healthy = oldest DM wait ≤ 2h, Watch = 2–6h, At Risk = > 6h`,
-    `Wait times are business hours only (Mon–Fri 6a–5p PST)  ·  Past SLA = waiting > ${CONFIG.thresholds.oldestUnanswered.green} biz hrs without a reply  ·  `
+    `Wait times are business hours only (Mon-Fri 6a-5p PST)  ·  Past SLA = waiting > ${CONFIG.thresholds.oldestUnanswered.green} biz hrs without a reply  ·  `
     + `Oldest Waiting table: top 3 past SLA highlighted red, others past SLA amber, within SLA green`,
     `CSAT % = (satisfied ÷ total) × 100  ·  Satisfied = 4+ out of 5  ·  Phone answer rate = answered inbound ÷ total inbound (biz hrs only)  ·  `
     + `Open tickets exclude ${(CONFIG.excludeAgents || []).join(", ")} (not on CS team)`,
@@ -5703,7 +5711,7 @@ function sendDailyRecap(recipientOverride, skipSave) {
   let html = `
   <div style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto;color:#1D1D1D;">
     <div style="background:${navy};color:#fff;padding:16px 24px;border-radius:8px 8px 0 0;">
-      <h1 style="margin:0;font-size:20px;">CS AI Recap — Daily</h1>
+      <h1 style="margin:0;font-size:20px;">CS AI Recap - Daily</h1>
       <p style="margin:4px 0 0;font-size:13px;color:#C3D3D7;">${dateStr}</p>
     </div>
 
@@ -5726,7 +5734,7 @@ function sendDailyRecap(recipientOverride, skipSave) {
   if (dailyThemesHtml) {
     html += `
       <div style="background:${cardBg};border:1px solid ${borderColor};border-radius:6px;padding:16px;margin-bottom:16px;">
-        <h2 style="margin:0 0 12px;font-size:15px;color:${navy};">Today's Top Themes</h2>
+        <h2 style="margin:0 0 12px;font-size:15px;color:${navy};">AI Recap - Today's Top Themes</h2>
         <div style="font-size:13px;line-height:1.6;color:#1D1D1D;">${dailyThemesHtml}</div>
         <div style="margin-top:10px;font-size:10px;color:#999;">Analysis powered by Claude AI across all tickets and call intents</div>
       </div>`;
@@ -5743,13 +5751,14 @@ function sendDailyRecap(recipientOverride, skipSave) {
         <h2 style="margin:0 0 12px;font-size:15px;color:${navy};">Email (Zendesk)</h2>
         <table style="width:100%;font-size:13px;border-collapse:collapse;">
           ${compHeader}
+          <tr><td style="${colLabel}padding:4px 0;">Tickets Created</td><td style="${colToday}font-weight:bold;">${zendesk.ticketsCreatedToday || 0}</td>${prevTd(prev.ticketsCreated)}</tr>
           <tr><td style="${colLabel}padding:4px 0;">Open Tickets</td><td style="${colToday}font-weight:bold;">${zendesk.totalOpen}</td>${prevTd(prev.openTickets)}</tr>
           <tr><td style="${colLabel}padding:4px 0;">On Hold</td><td style="${colToday}font-weight:bold;">${zendesk.onHoldQueueCount}</td>${prevTd(prev.onHold)}</tr>
           <tr><td style="${colLabel}padding:4px 0;">Unassigned</td><td style="${colToday}font-weight:bold;">${zendesk.unassigned}</td>${prevTd(prev.unassigned)}</tr>
           <tr><td style="${colLabel}padding:4px 0;">SAS Tickets</td><td style="${colToday}font-weight:bold;">${sasCount}</td>${prevTd(prev.sasTickets)}</tr>
           <tr><td style="${colLabel}padding:4px 0;">Voicemails (Open)</td><td style="${colToday}font-weight:bold;">${zendesk.openVoicemails || 0}</td>${prevTd(prev.openVoicemails)}</tr>
           <tr><td style="${colLabel}padding:4px 0;">Past SLA (${zendesk.slaHours}h)</td><td style="${colToday}font-weight:bold;color:${healthColors[emailHealth]};">${zendesk.totalBreached}</td>${prevTd(prev.pastSla)}</tr>
-          <tr><td style="${colLabel}padding:4px 0;">Solved Today</td><td style="${colToday}font-weight:bold;">${zendesk.totalHandledToday}</td>${prevTd(prev.solvedTotal)}</tr>`;
+          <tr><td style="${colLabel}padding:4px 0;">Tickets Solved</td><td style="${colToday}font-weight:bold;">${zendesk.totalHandledToday}</td>${prevTd(prev.solvedTotal)}</tr>`;
 
   html += `</table>`;
 
@@ -5792,8 +5801,8 @@ function sendDailyRecap(recipientOverride, skipSave) {
         <table style="width:100%;font-size:13px;border-collapse:collapse;">
           ${compHeader}
           <tr><td style="${colLabel}padding:4px 0;">Answer Rate</td><td style="${colToday}font-weight:bold;color:${healthColors[phoneHealth]};">${answerRateRounded}%</td>${prevTd(prev.answerRate, "%")}</tr>
-          <tr><td style="${colLabel}padding:4px 0;">Inbound (Team Answered)</td><td style="${colToday}font-weight:bold;">${aircall.teamAnswered}</td>${prevTd(prev.inboundCalls)}</tr>
-          <tr><td style="${colLabel}padding:4px 0;">Forwarded to SAS</td><td style="${colToday}font-weight:bold;">${aircall.forwarded}</td>${prevTd(prev.forwardedToSAS)}</tr>
+          <tr><td style="${colLabel}padding:4px 0;">Inbound Answered</td><td style="${colToday}font-weight:bold;">${aircall.teamAnswered}</td>${prevTd(prev.inboundCalls)}</tr>
+          <tr><td style="${colLabel}padding:4px 0;">Sent to Answer Service</td><td style="${colToday}font-weight:bold;">${aircall.forwarded}</td>${prevTd(prev.forwardedToSAS)}</tr>
           <tr><td style="${colLabel}padding:4px 0;">Outbound Calls</td><td style="${colToday}font-weight:bold;">${aircall.totalOutbound}</td>${prevTd(prev.outboundCalls)}</tr>
           <tr><td style="${colLabel}padding:4px 0;">Avg Call Duration</td><td style="${colToday}font-weight:bold;">${formatSeconds(aircall.avgDuration || 0)}</td>${hasPrev && prev.avgCallDuration ? `<td style="${colYest}color:#888;font-size:12px;">${formatSeconds(prev.avgCallDuration)}</td>` : (hasPrev ? `<td style="${colYest}color:#AAA;font-size:12px;">-</td>` : '')}</tr>`;
 
@@ -5832,15 +5841,18 @@ function sendDailyRecap(recipientOverride, skipSave) {
 
   html += `</div>`;
 
-  // ── SMS SECTION ──
-  if (sms.totalToday > 0) {
+  // ── TEXT MESSAGES SECTION ──
+  if (sms.totalToday > 0 || (hasPrev && (prev.smsInbound || prev.smsOutbound))) {
+    const smsTotal = (sms.inbound || 0) + (sms.outbound || 0);
+    const prevSmsTotal = hasPrev ? ((prev.smsInbound || 0) + (prev.smsOutbound || 0)) : null;
     html += `
       <div style="background:${cardBg};border:1px solid ${borderColor};border-radius:6px;padding:16px;margin-bottom:16px;">
-        <h2 style="margin:0 0 12px;font-size:15px;color:${navy};">SMS Activity</h2>
+        <h2 style="margin:0 0 12px;font-size:15px;color:${navy};">Text Messages</h2>
         <table style="width:100%;font-size:13px;border-collapse:collapse;">
-          <tr><td style="padding:4px 0;">Inbound</td><td style="text-align:right;font-weight:bold;">${sms.inbound}</td></tr>
-          <tr><td style="padding:4px 0;">Outbound</td><td style="text-align:right;font-weight:bold;">${sms.outbound}</td></tr>
-          <tr><td style="padding:4px 0;">Total</td><td style="text-align:right;font-weight:bold;">${sms.totalToday}</td></tr>
+          ${compHeader}
+          <tr><td style="${colLabel}padding:4px 0;">Inbound</td><td style="${colToday}font-weight:bold;">${sms.inbound || 0}</td>${prevTd(prev.smsInbound)}</tr>
+          <tr><td style="${colLabel}padding:4px 0;">Outbound</td><td style="${colToday}font-weight:bold;">${sms.outbound || 0}</td>${prevTd(prev.smsOutbound)}</tr>
+          <tr><td style="${colLabel}padding:4px 0;">Total</td><td style="${colToday}font-weight:bold;">${smsTotal}</td>${prevTd(prevSmsTotal)}</tr>
         </table>
       </div>`;
   }
@@ -5908,7 +5920,7 @@ function sendDailyRecap(recipientOverride, skipSave) {
         <div style="margin-bottom:4px;">The "${compLabel}" column shows the previous working day's end-of-day values for comparison.</div>
       </div>
       <div style="text-align:center;padding:8px 0;font-size:11px;color:#999;">
-        CS Command Center v2.4.2 · End of Day Summary · ${dateStr}
+        CS Intelligence · AI Recap v2.5.4 · End of Day Summary · ${dateStr}
       </div>
     </div>
   </div>`;
@@ -5925,6 +5937,7 @@ function sendDailyRecap(recipientOverride, skipSave) {
     sasTickets: sasCount,
     pastSla: zendesk.totalBreached,
     openVoicemails: zendesk.openVoicemails || 0,
+    ticketsCreated: zendesk.ticketsCreatedToday || 0,
     solvedTotal: zendesk.totalHandledToday || 0,
     agentEmail: {},
     // Phone
@@ -6058,11 +6071,11 @@ function sendDailyRecap(recipientOverride, skipSave) {
   }
 
   // ── SEND EMAIL (after data is safely persisted) ──
-  const subject = `CS AI Recap — Daily — ${Utilities.formatDate(now, tz, "MMM d")} — Email: ${healthLabels[emailHealth]} | Phone: ${healthLabels[phoneHealth]} | Social: ${healthLabels[socialHealth]}`;
+  const subject = `CS AI Recap - Daily - ${Utilities.formatDate(now, tz, "MMM d")} - Email: ${healthLabels[emailHealth]} | Phone: ${healthLabels[phoneHealth]} | Social: ${healthLabels[socialHealth]}`;
 
   GmailApp.sendEmail(recipients, subject, "View this email with HTML enabled.", {
     htmlBody: html,
-    name: "CS Command Center",
+    name: "CS Intelligence",
   });
 
   Logger.log("End of day summary sent to: " + recipients);
@@ -6472,7 +6485,10 @@ function buildHealthTrendHtml(trendDays, navy, borderColor) {
     let labelsHtml = "";
     trendDays.forEach(d => {
       const isHoliday = (d.email === "Holiday" || d.phone === "Holiday" || d.social === "Holiday");
-      const label = isHoliday ? d.dateLabel.split(" ")[0] + "*" : d.dateLabel.split(" ")[0];
+      const parts = d.dateLabel.split(" ");
+      const dayName = parts[0] + (isHoliday ? "*" : "");
+      const dateNum = parts[1] || "";
+      const label = dateNum ? `${dayName}<br><span style="font-size:8px;color:#BBB;">${dateNum}</span>` : dayName;
       labelsHtml += `<td style="text-align:center;font-size:9px;color:${isHoliday ? '#AAA' : '#999'};padding-top:2px;">${label}</td>`;
     });
 
@@ -6486,11 +6502,15 @@ function buildHealthTrendHtml(trendDays, navy, borderColor) {
   // Legend
   // Check if any day is a holiday to conditionally show the legend item
   const hasHoliday = trendDays.some(d => d.email === "Holiday" || d.phone === "Holiday" || d.social === "Holiday");
+  const hasNoData = trendDays.some(d => {
+    return (d.email === "" || d.phone === "" || d.social === "") && d.email !== "Holiday";
+  });
   const legend = `<div style="text-align:center;margin-top:8px;font-size:10px;">
     <span style="display:inline-block;background:#2E7D32;color:#fff;padding:1px 8px;border-radius:8px;margin:0 4px;">Healthy</span>
     <span style="display:inline-block;background:#F57F17;color:#fff;padding:1px 8px;border-radius:8px;margin:0 4px;">Watch</span>
     <span style="display:inline-block;background:#C62828;color:#fff;padding:1px 8px;border-radius:8px;margin:0 4px;">At Risk</span>
     ${hasHoliday ? '<span style="display:inline-block;background:#D5D5D5;color:#666;padding:1px 8px;border-radius:8px;margin:0 4px;">* Holiday</span>' : ''}
+    ${hasNoData ? '<span style="display:inline-block;background:#E0E0E0;color:#666;padding:1px 8px;border-radius:8px;margin:0 4px;">No data</span>' : ''}
   </div>`;
 
   return `<div style="background:${cardBg};border:1px solid ${borderColor};border-radius:6px;padding:16px;margin-bottom:16px;">
@@ -6754,7 +6774,7 @@ function sendWeeklySummary(now, tz, recipientOverride) {
   let html = `
   <div style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto;color:#1D1D1D;">
     <div style="background:${navy};color:#fff;padding:16px 24px;border-radius:8px 8px 0 0;">
-      <h1 style="margin:0;font-size:20px;">CS AI Recap — Weekly</h1>
+      <h1 style="margin:0;font-size:20px;">CS AI Recap - Weekly</h1>
       <p style="margin:4px 0 0;font-size:13px;color:#C3D3D7;">${weekLabel} (${curr.days} working days)</p>
     </div>
     <div style="padding:20px 24px;">`;
@@ -6809,8 +6829,9 @@ function sendWeeklySummary(now, tz, recipientOverride) {
     const trendHtml = analyzeThemeTrends(thisWeek.start, thisWeek.end, "Week of " + weekLabel);
     if (trendHtml) {
       html += `<div style="background:${cardBg};border:1px solid ${borderColor};border-radius:6px;padding:16px;margin-bottom:16px;">
-        <h2 style="margin:0 0 12px;font-size:15px;color:${navy};">AI Recap — Weekly Theme Trends</h2>
+        <h2 style="margin:0 0 12px;font-size:15px;color:${navy};">AI Recap - Weekly Theme Trends</h2>
         <div style="font-size:13px;line-height:1.6;">${trendHtml}</div>
+        <div style="margin-top:10px;font-size:10px;color:#999;">Analysis powered by Claude AI across all tickets and call intents</div>
       </div>`;
     }
   } catch (e) {
@@ -6848,13 +6869,18 @@ function sendWeeklySummary(now, tz, recipientOverride) {
         <td style="${wAgentHdrStyle}text-align:left;"></td>
         <td style="${wAgentHdrStyle}">Solved</td>
         ${prev ? `<td style="${wAgentHdrStyle}">Prev</td>` : ""}
+        ${prev ? `<td style="${wAgentHdrStyle}">Change</td>` : ""}
       </tr>`;
   curr.agentSolved.forEach((a, i) => {
     const prevVal = prev ? prev.agentSolved[i].total : null;
+    const delta = prevVal !== null ? a.total - prevVal : null;
+    const deltaStr = delta !== null ? (delta >= 0 ? `<span style="color:#2E7D32;">+${delta}</span>` : `<span style="color:#C62828;">${delta}</span>`) : "-";
+    const prevStr = prevVal !== null ? String(prevVal) : "-";
     html += `<tr>
         <td style="${wAgentNameStyle}">${a.name.split(" ")[0]}</td>
         <td style="${wAgentCellStyle}">${a.total}</td>
-        ${prev ? `<td style="${wAgentPrevStyle}">${prevVal !== null ? prevVal : "-"}</td>` : ""}
+        ${prev ? `<td style="${wAgentPrevStyle}">${prevStr}</td>` : ""}
+        ${prev ? `<td style="${wAgentPrevStyle}">${deltaStr}</td>` : ""}
       </tr>`;
   });
   html += `</table></div>`;
@@ -6865,8 +6891,8 @@ function sendWeeklySummary(now, tz, recipientOverride) {
     <table style="width:100%;font-size:13px;border-collapse:collapse;">
       ${headerRow}
       <tr><td style="${colLabel}">Avg Answer Rate</td><td style="${colThis}font-weight:bold;color:${curr.avgAnswerRate >= 75 ? '#2E7D32' : '#C62828'};">${curr.avgAnswerRate}%</td>${prevCell(curr.avgAnswerRate, prev ? prev.avgAnswerRate : null, "%")}</tr>
-      <tr><td style="${colLabel}">Total Inbound</td><td style="${colThis}font-weight:bold;">${curr.totalInbound}</td>${prevCell(curr.totalInbound, prev ? prev.totalInbound : null, "")}</tr>
-      <tr><td style="${colLabel}">Forwarded to SAS</td><td style="${colThis}font-weight:bold;">${curr.totalForwarded}</td>${prevCell(curr.totalForwarded, prev ? prev.totalForwarded : null, "")}</tr>
+      <tr><td style="${colLabel}">Inbound Answered</td><td style="${colThis}font-weight:bold;">${curr.totalInbound}</td>${prevCell(curr.totalInbound, prev ? prev.totalInbound : null, "")}</tr>
+      <tr><td style="${colLabel}">Sent to Answer Service</td><td style="${colThis}font-weight:bold;">${curr.totalForwarded}</td>${prevCell(curr.totalForwarded, prev ? prev.totalForwarded : null, "")}</tr>
       <tr><td style="${colLabel}">Total Outbound</td><td style="${colThis}font-weight:bold;">${curr.totalOutbound}</td>${prevCell(curr.totalOutbound, prev ? prev.totalOutbound : null, "")}</tr>
 `;
 
@@ -6920,12 +6946,28 @@ function sendWeeklySummary(now, tz, recipientOverride) {
     <table style="width:100%;font-size:13px;border-collapse:collapse;">
       ${headerRow}
       <tr><td style="${colLabel}">Avg Unread DMs at EOD</td><td style="${colThis}font-weight:bold;">${curr.avgUnreadDMs}</td>${prevCell(curr.avgUnreadDMs, prev ? prev.avgUnreadDMs : null, "")}</tr>
-      <tr><td style="${colLabel}">Total SMS In/Out</td><td style="${colThis}font-weight:bold;">${curr.totalSmsInbound} / ${curr.totalSmsOutbound}</td>${prev ? `<td style="${colPrev}">${prev.totalSmsInbound} / ${prev.totalSmsOutbound}</td>` : `<td style="${colPrev}">${noData}</td>`}</tr>
     </table></div>`;
 
-  // Footer
+  // ── TEXT MESSAGES SECTION ──
+  html += `<div style="background:${cardBg};border:1px solid ${borderColor};border-radius:6px;padding:16px;margin-bottom:16px;">
+    <h2 style="margin:0 0 12px;font-size:15px;color:${navy};">Text Messages</h2>
+    <table style="width:100%;font-size:13px;border-collapse:collapse;">
+      ${headerRow}
+      <tr><td style="${colLabel}">Total In/Out</td><td style="${colThis}font-weight:bold;">${curr.totalSmsInbound} / ${curr.totalSmsOutbound}</td>${prev ? `<td style="${colPrev}">${prev.totalSmsInbound} / ${prev.totalSmsOutbound}</td>` : `<td style="${colPrev}">${noData}</td>`}</tr>
+    </table></div>`;
+
+  // Footer with health status definitions
+  const th = CONFIG.thresholds;
+  const slaHours = th.oldestUnanswered.green;
+  html += `
+      <div style="border-top:1px solid ${borderColor};margin-top:20px;padding:16px 0 4px;font-size:11px;color:#999;">
+        <div style="margin-bottom:8px;font-weight:bold;color:#888;">Health Status Thresholds</div>
+        <div style="margin-bottom:4px;">Email: Healthy = 0-5 tickets past ${slaHours}h SLA · Watch = 6-10 past SLA · At Risk = 11+ past SLA</div>
+        <div style="margin-bottom:4px;">Phone: Healthy = ${th.phoneAnswerRate.green}%+ answer rate · Watch = ${th.phoneAnswerRate.yellow}-${th.phoneAnswerRate.green - 1}% · At Risk = below ${th.phoneAnswerRate.yellow}%</div>
+        <div style="margin-bottom:4px;">Social: Healthy = oldest unread DM under ${th.socialResponseTime.green / 60}h · Watch = ${th.socialResponseTime.green / 60}-${th.socialResponseTime.yellow / 60}h · At Risk = over ${th.socialResponseTime.yellow / 60}h</div>
+      </div>`;
   html += `<div style="text-align:center;font-size:11px;color:#999;padding-top:8px;">
-      CS Command Center v2.4.2 · Weekly Summary · ${weekLabel}
+      CS Intelligence · AI Recap v2.5.4 · Weekly Summary · ${weekLabel}
       ${prev ? '<br>Comparison: ' + prevWeekLabel : '<br>No prior week data available for comparison'}
     </div>
     </div>
@@ -6935,7 +6977,7 @@ function sendWeeklySummary(now, tz, recipientOverride) {
 
   GmailApp.sendEmail(recipients, subject, "View this email with HTML enabled.", {
     htmlBody: html,
-    name: "CS Command Center",
+    name: "CS Intelligence",
   });
 
   Logger.log("Weekly summary sent to: " + recipients);
@@ -6990,6 +7032,10 @@ function sendMonthlySummary(now, tz, recipientOverride) {
   const prevMonthLabel = prev ? monthNames[lastMonth - 1] + " " + lastYear : "";
   const noData = '<span style="color:#AAA;">no prior data</span>';
 
+  const monthStart = thisYear + "-" + String(thisMonth).padStart(2, "0") + "-01";
+  const monthEndDay = new Date(thisYear, thisMonth, 0).getDate();
+  const monthEnd = thisYear + "-" + String(thisMonth).padStart(2, "0") + "-" + String(monthEndDay).padStart(2, "0");
+
   const colLabel = "width:50%;padding:4px 0;";
   const colThis = "width:25%;text-align:right;padding:4px 0;";
   const colPrev = "width:25%;text-align:right;padding:4px 0;color:#888;font-size:12px;";
@@ -7008,20 +7054,99 @@ function sendMonthlySummary(now, tz, recipientOverride) {
   let html = `
   <div style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto;color:#1D1D1D;">
     <div style="background:${navy};color:#fff;padding:16px 24px;border-radius:8px 8px 0 0;">
-      <h1 style="margin:0;font-size:20px;">CS AI Recap — Monthly</h1>
+      <h1 style="margin:0;font-size:20px;">CS AI Recap - Monthly</h1>
       <p style="margin:4px 0 0;font-size:13px;color:#C3D3D7;">${monthLabel} (${curr.days} working days)</p>
     </div>
     <div style="padding:20px 24px;">`;
+
+  // ── HEALTH TRENDS MINI-CHARTS ──
+  try {
+    const trendDays = readHealthTrends(thisRange.start, thisRange.end, tz);
+    html += buildHealthTrendHtml(trendDays, navy, borderColor);
+  } catch (e) {
+    Logger.log("Health trends in monthly email failed (non-fatal): " + e.toString());
+  }
+
+  // ── AI RECAP — MONTHLY TREND ANALYSIS ──
+  try {
+    const mStart = thisYear + "-" + String(thisMonth).padStart(2, "0") + "-01";
+    const mEndDay = new Date(thisYear, thisMonth, 0).getDate();
+    const mEnd = thisYear + "-" + String(thisMonth).padStart(2, "0") + "-" + String(mEndDay).padStart(2, "0");
+    const trendHtml = analyzeThemeTrends(mStart, mEnd, monthLabel);
+    if (trendHtml) {
+      html += `<div style="background:${cardBg};border:1px solid ${borderColor};border-radius:6px;padding:16px;margin-bottom:16px;">
+        <h2 style="margin:0 0 12px;font-size:15px;color:${navy};">AI Recap - Monthly Theme Trends</h2>
+        <div style="font-size:13px;line-height:1.6;">${trendHtml}</div>
+        <div style="margin-top:10px;font-size:10px;color:#999;">Analysis powered by Claude AI across all tickets and call intents</div>
+      </div>`;
+    }
+  } catch (e) {
+    Logger.log("Monthly theme trend analysis failed (non-fatal): " + e.toString());
+  }
+
+  // ── FEATURE REQUESTS ──
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const taxSheet = ss.getSheetByName("Ticket Taxonomy");
+    if (taxSheet && taxSheet.getLastRow() > 1) {
+      const taxData = taxSheet.getDataRange().getValues();
+      const taxHeaders = taxData[0];
+      const reqTypeCol = taxHeaders.indexOf("Request Type");
+      const createdCol = taxHeaders.indexOf("Created");
+      const subjectCol = taxHeaders.indexOf("Subject");
+      const ticketIdCol = taxHeaders.indexOf("Ticket ID");
+      const featureCol = taxHeaders.indexOf("Feature Requested");
+
+      if (reqTypeCol >= 0) {
+        const frTz = Session.getScriptTimeZone();
+        const featureRequests = [];
+        for (let i = 1; i < taxData.length; i++) {
+          if (String(taxData[i][reqTypeCol]).trim() === "Feature Request") {
+            const created = taxData[i][createdCol];
+            const createdStr = created instanceof Date
+              ? Utilities.formatDate(created, frTz, "yyyy-MM-dd")
+              : String(created || "").substring(0, 10);
+            // Check if within this month
+            if (createdStr >= monthStart && createdStr <= monthEnd) {
+              featureRequests.push({
+                id: taxData[i][ticketIdCol],
+                subject: taxData[i][subjectCol] || "",
+                feature: taxData[i][featureCol] || "",
+              });
+            }
+          }
+        }
+
+        if (featureRequests.length > 0) {
+          const subdomain = CONFIG.zendesk.subdomain;
+          html += `<div style="background:${cardBg};border:1px solid ${borderColor};border-radius:6px;padding:16px;margin-bottom:16px;">
+            <h2 style="margin:0 0 12px;font-size:15px;color:${navy};">Feature & Product Requests</h2>
+            <div style="font-size:13px;color:#555;margin-bottom:8px;">${featureRequests.length} feature request${featureRequests.length > 1 ? 's' : ''} this month:</div>`;
+          featureRequests.forEach(fr => {
+            const escaped = (fr.feature || fr.subject || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+            const link = fr.id ? `<a href="https://${subdomain}.zendesk.com/agent/tickets/${fr.id}" style="color:#7597A0;text-decoration:none;">#${fr.id}</a>` : "";
+            html += `<div style="margin-bottom:6px;padding-left:12px;border-left:2px solid #CCC6C0;">
+              <span style="font-size:12px;">${escaped}</span> ${link ? `<span style="font-size:11px;color:#999;">${link}</span>` : ""}
+            </div>`;
+          });
+          html += `</div>`;
+        }
+      }
+    }
+  } catch (e) {
+    Logger.log("Feature requests section failed (non-fatal): " + e.toString());
+  }
 
   // ── EMAIL / ZENDESK ──
   html += `<div style="background:${cardBg};border:1px solid ${borderColor};border-radius:6px;padding:16px;margin-bottom:16px;">
     <h2 style="margin:0 0 12px;font-size:15px;color:${navy};">Email (Zendesk)</h2>
     <table style="width:100%;font-size:13px;border-collapse:collapse;">
       ${headerRow}
+      <tr><td style="${colLabel}">Tickets Created</td><td style="${colThis}font-weight:bold;">${curr.totalCreated}</td>${prevCell(curr.totalCreated, prev ? prev.totalCreated : null)}</tr>
+      <tr><td style="${colLabel}">Tickets Solved</td><td style="${colThis}font-weight:bold;">${curr.totalSolved}</td>${prevCell(curr.totalSolved, prev ? prev.totalSolved : null)}</tr>
       <tr><td style="${colLabel}">Avg Daily Open Tickets</td><td style="${colThis}font-weight:bold;">${curr.avgOpenTickets !== null ? curr.avgOpenTickets : '<span style="color:#AAA;font-weight:normal;">no data</span>'}</td>${prevCell(curr.avgOpenTickets, prev ? prev.avgOpenTickets : null)}</tr>
       <tr><td style="${colLabel}">Avg Daily Past SLA</td><td style="${colThis}font-weight:bold;${curr.avgPastSla !== null && curr.avgPastSla > 0 ? 'color:#C62828;' : ''}">${curr.avgPastSla !== null ? curr.avgPastSla : '<span style="color:#AAA;font-weight:normal;">no data</span>'}</td>${prevCell(curr.avgPastSla, prev ? prev.avgPastSla : null)}</tr>
       <tr><td style="${colLabel}">Avg Daily Unassigned</td><td style="${colThis}font-weight:bold;">${curr.avgUnassigned !== null ? curr.avgUnassigned : '<span style="color:#AAA;font-weight:normal;">no data</span>'}</td>${prevCell(curr.avgUnassigned, prev ? prev.avgUnassigned : null)}</tr>
-      <tr><td style="${colLabel}">Total Tickets Solved</td><td style="${colThis}font-weight:bold;">${curr.totalSolved}</td>${prevCell(curr.totalSolved, prev ? prev.totalSolved : null)}</tr>
       <tr><td style="${colLabel}">Avg Solved/Day</td><td style="${colThis}font-weight:bold;">${(curr.totalSolved / curr.days).toFixed(1)}</td>${prev ? `<td style="${colPrev}">${(prev.totalSolved / prev.days).toFixed(1)}</td>` : `<td style="${colPrev}">${noData}</td>`}</tr>`;
 
   html += `</table>`;
@@ -7032,19 +7157,27 @@ function sendMonthlySummary(now, tz, recipientOverride) {
   const mACell = `font-size:12px;text-align:center;padding:4px 6px;`;
   const mAPrev = `font-size:11px;text-align:center;padding:4px 6px;color:#888;`;
 
+  const shortMonthNames = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const prevMonthShort = prev ? shortMonthNames[lastMonth - 1] : "";
+
   html += `<div style="margin-top:12px;font-size:12px;color:${navy};font-weight:bold;border-top:1px solid #E1DFDD;padding-top:10px;">Per Agent</div>
     <table style="width:100%;font-size:12px;border-collapse:collapse;margin-top:6px;">
       <tr>
         <td style="${mAHdr}text-align:left;"></td>
         <td style="${mAHdr}">Solved</td>
-        ${prev ? `<td style="${mAHdr}">Prev</td>` : ""}
+        ${prev ? `<td style="${mAHdr}">${prevMonthShort}</td>` : ""}
+        ${prev ? `<td style="${mAHdr}">Change</td>` : ""}
       </tr>`;
   curr.agentSolved.forEach((a, i) => {
     const prevVal = prev ? prev.agentSolved[i].total : null;
+    const delta = prevVal !== null ? a.total - prevVal : null;
+    const deltaStr = delta !== null ? (delta >= 0 ? `<span style="color:#2E7D32;">+${delta}</span>` : `<span style="color:#C62828;">${delta}</span>`) : "-";
+    const prevStr = prevVal !== null ? String(prevVal) : "-";
     html += `<tr>
         <td style="${mAName}">${a.name.split(" ")[0]}</td>
         <td style="${mACell}">${a.total}</td>
-        ${prev ? `<td style="${mAPrev}">${prevVal !== null ? prevVal : "-"}</td>` : ""}
+        ${prev ? `<td style="${mAPrev}">${prevStr}</td>` : ""}
+        ${prev ? `<td style="${mAPrev}">${deltaStr}</td>` : ""}
       </tr>`;
   });
   html += `</table></div>`;
@@ -7055,8 +7188,8 @@ function sendMonthlySummary(now, tz, recipientOverride) {
     <table style="width:100%;font-size:13px;border-collapse:collapse;">
       ${headerRow}
       <tr><td style="${colLabel}">Avg Answer Rate</td><td style="${colThis}font-weight:bold;color:${curr.avgAnswerRate >= 75 ? '#2E7D32' : '#C62828'};">${curr.avgAnswerRate}%</td>${prevCell(curr.avgAnswerRate, prev ? prev.avgAnswerRate : null, "%")}</tr>
-      <tr><td style="${colLabel}">Total Inbound</td><td style="${colThis}font-weight:bold;">${curr.totalInbound}</td>${prevCell(curr.totalInbound, prev ? prev.totalInbound : null)}</tr>
-      <tr><td style="${colLabel}">Forwarded to SAS</td><td style="${colThis}font-weight:bold;">${curr.totalForwarded}</td>${prevCell(curr.totalForwarded, prev ? prev.totalForwarded : null)}</tr>
+      <tr><td style="${colLabel}">Inbound Answered</td><td style="${colThis}font-weight:bold;">${curr.totalInbound}</td>${prevCell(curr.totalInbound, prev ? prev.totalInbound : null)}</tr>
+      <tr><td style="${colLabel}">Sent to Answer Service</td><td style="${colThis}font-weight:bold;">${curr.totalForwarded}</td>${prevCell(curr.totalForwarded, prev ? prev.totalForwarded : null)}</tr>
       <tr><td style="${colLabel}">Total Outbound</td><td style="${colThis}font-weight:bold;">${curr.totalOutbound}</td>${prevCell(curr.totalOutbound, prev ? prev.totalOutbound : null)}</tr>`;
 
   html += `</table>`;
@@ -7103,50 +7236,42 @@ function sendMonthlySummary(now, tz, recipientOverride) {
 
   // ── SOCIAL ──
   html += `<div style="background:${cardBg};border:1px solid ${borderColor};border-radius:6px;padding:16px;margin-bottom:16px;">
-    <h2 style="margin:0 0 12px;font-size:15px;color:${navy};">Social & SMS</h2>
+    <h2 style="margin:0 0 12px;font-size:15px;color:${navy};">Social (Meta Business Suite)</h2>
     <table style="width:100%;font-size:13px;border-collapse:collapse;">
       ${headerRow}
       <tr><td style="${colLabel}">Avg Unread DMs at EOD</td><td style="${colThis}font-weight:bold;">${curr.avgUnreadDMs}</td>${prevCell(curr.avgUnreadDMs, prev ? prev.avgUnreadDMs : null)}</tr>
-      <tr><td style="${colLabel}">Total SMS In/Out</td><td style="${colThis}font-weight:bold;">${curr.totalSmsInbound} / ${curr.totalSmsOutbound}</td>${prev ? `<td style="${colPrev}">${prev.totalSmsInbound} / ${prev.totalSmsOutbound}</td>` : `<td style="${colPrev}">${noData}</td>`}</tr>
     </table></div>`;
 
-  // ── HEALTH TRENDS MINI-CHARTS ──
-  try {
-    const trendDays = readHealthTrends(thisRange.start, thisRange.end, tz);
-    html += buildHealthTrendHtml(trendDays, navy, borderColor);
-  } catch (e) {
-    Logger.log("Health trends in monthly email failed (non-fatal): " + e.toString());
-  }
+  // ── TEXT MESSAGES ──
+  html += `<div style="background:${cardBg};border:1px solid ${borderColor};border-radius:6px;padding:16px;margin-bottom:16px;">
+    <h2 style="margin:0 0 12px;font-size:15px;color:${navy};">Text Messages</h2>
+    <table style="width:100%;font-size:13px;border-collapse:collapse;">
+      ${headerRow}
+      <tr><td style="${colLabel}">Total In/Out</td><td style="${colThis}font-weight:bold;">${curr.totalSmsInbound} / ${curr.totalSmsOutbound}</td>${prev ? `<td style="${colPrev}">${prev.totalSmsInbound} / ${prev.totalSmsOutbound}</td>` : `<td style="${colPrev}">${noData}</td>`}</tr>
+    </table></div>`;
 
-  // ── AI RECAP — MONTHLY TREND ANALYSIS ──
-  try {
-    const mStart = thisYear + "-" + String(thisMonth).padStart(2, "0") + "-01";
-    const mEndDay = new Date(thisYear, thisMonth, 0).getDate();
-    const mEnd = thisYear + "-" + String(thisMonth).padStart(2, "0") + "-" + String(mEndDay).padStart(2, "0");
-    const trendHtml = analyzeThemeTrends(mStart, mEnd, monthLabel);
-    if (trendHtml) {
-      html += `<div style="background:${cardBg};border:1px solid ${borderColor};border-radius:6px;padding:16px;margin-top:16px;">
-        <h2 style="margin:0 0 12px;font-size:15px;color:${navy};">AI Recap — Monthly Theme Trends</h2>
-        <div style="font-size:13px;line-height:1.6;">${trendHtml}</div>
+  // Footer with health status definitions
+  const th = CONFIG.thresholds;
+  const slaHours = th.oldestUnanswered.green;
+  html += `
+      <div style="border-top:1px solid ${borderColor};margin-top:20px;padding:16px 0 4px;font-size:11px;color:#999;">
+        <div style="margin-bottom:8px;font-weight:bold;color:#888;">Health Status Thresholds</div>
+        <div style="margin-bottom:4px;">Email: Healthy = 0-5 tickets past ${slaHours}h SLA · Watch = 6-10 past SLA · At Risk = 11+ past SLA</div>
+        <div style="margin-bottom:4px;">Phone: Healthy = ${th.phoneAnswerRate.green}%+ answer rate · Watch = ${th.phoneAnswerRate.yellow}-${th.phoneAnswerRate.green - 1}% · At Risk = below ${th.phoneAnswerRate.yellow}%</div>
+        <div style="margin-bottom:4px;">Social: Healthy = oldest unread DM under ${th.socialResponseTime.green / 60}h · Watch = ${th.socialResponseTime.green / 60}-${th.socialResponseTime.yellow / 60}h · At Risk = over ${th.socialResponseTime.yellow / 60}h</div>
       </div>`;
-    }
-  } catch (e) {
-    Logger.log("Monthly theme trend analysis failed (non-fatal): " + e.toString());
-  }
-
-  // Footer
   html += `<div style="text-align:center;font-size:11px;color:#999;padding-top:8px;">
-      CS Command Center v2.4.2 · Monthly Summary · ${monthLabel}
+      CS Intelligence · AI Recap v2.5.4 · Monthly Summary · ${monthLabel}
       ${prev ? '<br>Comparison: ' + prevMonthLabel + ' (' + prev.days + ' working days)' : '<br>No prior month data available for comparison'}
     </div>
     </div>
   </div>`;
 
-  const subject = `CS AI Recap — Monthly — ${monthLabel} — Solved: ${curr.totalSolved} · Avg Open: ${curr.avgOpenTickets !== null ? curr.avgOpenTickets : "N/A"} · Answer Rate: ${curr.avgAnswerRate}%`;
+  const subject = `CS AI Recap - Monthly - ${monthLabel}`;
 
   GmailApp.sendEmail(recipients, subject, "View this email with HTML enabled.", {
     htmlBody: html,
-    name: "CS Command Center",
+    name: "CS Intelligence",
   });
 
   Logger.log("Monthly summary sent to: " + recipients);
@@ -7327,7 +7452,7 @@ function updateAgentDashboards(zendesk, aircall, csat, postCall) {
   const dimFg = BRAND.airBlueMedium;
   const green = "#2E7D32";
   const red = "#C62828";
-  const amber = "#E65100";
+  const amber = "#F57F17";
   const gray = BRAND.beigeMedium;
   const borderColor = BRAND.beigeLight;
   const sectionBg = BRAND.airBlueLight;
@@ -7802,7 +7927,7 @@ function updateAgentDashboards(zendesk, aircall, csat, postCall) {
     rightKpiRow("Answer Rate", Math.round(answerRate) + "%",
       answerRate >= (CONFIG.thresholds.phoneAnswerRate.green || 75) ? green : red);
     rightKpiRow("Answered / Total", `${answered} / ${totalInbound}`);
-    rightKpiRow("Forwarded to SAS", forwarded);
+    rightKpiRow("Sent to Answer Service", forwarded);
     rightKpiRow("Team Outbound", totalOutbound);
 
     // Missed calls table
@@ -7848,7 +7973,7 @@ function updateAgentDashboards(zendesk, aircall, csat, postCall) {
     const footerRow = maxRow + 1;
     sheet.setRowHeight(footerRow, 22);
     sheet.getRange(footerRow, 1, 1, totalCols).merge()
-      .setValue(`CS Command Center v2.4.2  ·  ${dateStr}  ·  Team avg = average across ${agents.length} agents`)
+      .setValue(`CS Intelligence · Agent Hub v2.5.4  ·  ${dateStr}  ·  Team avg = average across ${agents.length} agents`)
       .setFontColor(dimFg).setFontSize(8).setFontStyle("italic")
       .setHorizontalAlignment("center").setBackground(bg).setFontFamily("Arial");
 
@@ -8184,7 +8309,7 @@ function updateHealthTrends() {
   const footerRow = 46; // below all 3 charts + legends
   const footerCols = 10; // cols H (8) through Q (17)
   const footerLines = [
-    `CS Command Center v2.4.2  ·  Health Trends  ·  Business days only (Mon-Fri, weekends excluded)`,
+    `CS Intelligence · Command Center v2.5.4  ·  Health Trends  ·  Business days only (Mon-Fri, weekends excluded)`,
     `Email: Healthy = 0-5 past SLA, Watch = 6-10 past SLA, At Risk = 11+ past SLA`,
     `Phone: Healthy = answer rate >= ${th.phoneAnswerRate.green}%, Watch = ${th.phoneAnswerRate.yellow}-${th.phoneAnswerRate.green - 1}%, At Risk = < ${th.phoneAnswerRate.yellow}%`,
     `Social: Healthy = oldest unread DM <= ${th.socialResponseTime.green / 60}h, Watch = ${th.socialResponseTime.green / 60}-${th.socialResponseTime.yellow / 60}h, At Risk = > ${th.socialResponseTime.yellow / 60}h`,
@@ -8749,7 +8874,7 @@ function sendNonWorkingDaySnapshot(zendesk, meta, now, dateStr, tz, recipients) 
   let html = `
   <div style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto;color:#1D1D1D;">
     <div style="background:${navy};color:#fff;padding:16px 24px;border-radius:8px 8px 0 0;">
-      <h1 style="margin:0;font-size:20px;">CS AI Recap — Non-Working Day</h1>
+      <h1 style="margin:0;font-size:20px;">CS AI Recap - Non-Working Day</h1>
       <p style="margin:4px 0 0;font-size:13px;color:#C3D3D7;">${dateStr}</p>
     </div>
 
@@ -8779,7 +8904,7 @@ function sendNonWorkingDaySnapshot(zendesk, meta, now, dateStr, tz, recipients) 
         <table style="width:100%;font-size:13px;border-collapse:collapse;">
           ${nwdCompHeader}
           <tr><td style="padding:4px 0;">Unread DMs</td><td style="text-align:right;font-weight:bold;color:${metaUnread > 0 ? '#C62828' : '#2E7D32'};">${metaUnread}</td>${prevTd(prev.unreadDMs)}</tr>
-          <tr><td style="padding:4px 0;">Active Conversations (24h)</td><td style="text-align:right;font-weight:bold;">${metaConvos.length}</td>${hasPrev ? '<td></td>' : ''}</tr>
+          <tr><td style="padding:4px 0;">Active Conversations (24h)</td><td style="text-align:right;font-weight:bold;">${metaConvos.length}</td>${prevTd(prev.activeConversations)}</tr>
         </table>
       </div>
 
@@ -8799,23 +8924,24 @@ function sendNonWorkingDaySnapshot(zendesk, meta, now, dateStr, tz, recipients) 
   if (dailyThemesHtml) {
     html += `
       <div style="background:${cardBg};border:1px solid ${borderColor};border-radius:6px;padding:16px;margin-bottom:16px;">
-        <h2 style="margin:0 0 12px;font-size:15px;color:${navy};">AI Recap — Top 3 Themes</h2>
+        <h2 style="margin:0 0 12px;font-size:15px;color:${navy};">AI Recap - Top 3 Themes</h2>
         <div style="font-size:13px;line-height:1.6;">${dailyThemesHtml}</div>
+        <div style="margin-top:10px;font-size:10px;color:#999;">Analysis powered by Claude AI across all tickets and call intents</div>
       </div>`;
   }
 
   html += `
       <div style="text-align:center;padding:16px 0 8px;font-size:11px;color:#999;">
-        CS Command Center v2.4.2 · Non-Working Day · ${dateStr}
+        CS Intelligence · AI Recap v2.5.4 · Non-Working Day · ${dateStr}
       </div>
     </div>
   </div>`;
 
-  const subject = `CS AI Recap — Non-Working Day — ${Utilities.formatDate(now, tz, "MMM d")} — Open: ${zendesk.totalOpen} · VM: ${vmCount} · Unread DMs: ${metaUnread}`;
+  const subject = `CS AI Recap - Non-Working Day - ${Utilities.formatDate(now, tz, "MMM d")} - Open: ${zendesk.totalOpen} · VM: ${vmCount} · Unread DMs: ${metaUnread}`;
 
   GmailApp.sendEmail(recipients, subject, "View this email with HTML enabled.", {
     htmlBody: html,
-    name: "CS Command Center",
+    name: "CS Intelligence",
   });
 
   Logger.log("Non-working day snapshot sent to: " + recipients);
@@ -8824,6 +8950,8 @@ function sendNonWorkingDaySnapshot(zendesk, meta, now, dateStr, tz, recipients) 
 // ─── CLEANUP & PATCH DAILY METRICS LOG ───
 // Run once to sort rows by date and patch in phone CSAT from PostCall survey data.
 function cleanupDailyMetricsLog() {
+  loadThresholds();
+  const props = PropertiesService.getScriptProperties();
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName("Daily Metrics Log");
   if (!sheet || sheet.getLastRow() <= 1) { Logger.log("No data to clean up"); return; }
@@ -8839,16 +8967,32 @@ function cleanupDailyMetricsLog() {
 
   if (dateCol < 0) { Logger.log("Can't find Date column"); return; }
 
-  // Phone CSAT data from Aircall PostCall survey export (March-May 2026)
+  // Phone CSAT data from Aircall PostCall survey export (March-June 2026)
   const phoneCsatData = {
-    "2026-05-19": { pct: 83, responses: 6 },
-    "2026-05-20": { pct: 100, responses: 6 },
-    "2026-05-21": { pct: 100, responses: 2 },
-    "2026-05-22": { pct: 100, responses: 4 },
-    "2026-05-26": { pct: 100, responses: 4 },
-    "2026-05-27": { pct: 90, responses: 10 },
-    "2026-05-28": { pct: 100, responses: 3 },
-    "2026-05-29": { pct: 100, responses: 5 },
+    "2026-04-01": { pct: 83, responses: 6 }, "2026-04-02": { pct: 100, responses: 7 },
+    "2026-04-03": { pct: 71, responses: 7 }, "2026-04-04": { pct: 100, responses: 1 },
+    "2026-04-06": { pct: 100, responses: 8 }, "2026-04-07": { pct: 100, responses: 3 },
+    "2026-04-08": { pct: 100, responses: 5 }, "2026-04-09": { pct: 100, responses: 6 },
+    "2026-04-10": { pct: 88, responses: 8 }, "2026-04-11": { pct: 100, responses: 1 },
+    "2026-04-12": { pct: 100, responses: 1 }, "2026-04-13": { pct: 75, responses: 4 },
+    "2026-04-14": { pct: 100, responses: 2 }, "2026-04-15": { pct: 100, responses: 7 },
+    "2026-04-17": { pct: 100, responses: 2 }, "2026-04-20": { pct: 100, responses: 1 },
+    "2026-04-21": { pct: 100, responses: 10 }, "2026-04-22": { pct: 100, responses: 5 },
+    "2026-04-23": { pct: 100, responses: 2 }, "2026-04-24": { pct: 100, responses: 4 },
+    "2026-04-27": { pct: 100, responses: 6 }, "2026-04-28": { pct: 75, responses: 4 },
+    "2026-04-29": { pct: 100, responses: 3 }, "2026-04-30": { pct: 100, responses: 3 },
+    "2026-05-01": { pct: 100, responses: 4 }, "2026-05-04": { pct: 100, responses: 3 },
+    "2026-05-05": { pct: 100, responses: 4 }, "2026-05-06": { pct: 100, responses: 3 },
+    "2026-05-07": { pct: 100, responses: 7 }, "2026-05-08": { pct: 100, responses: 5 },
+    "2026-05-09": { pct: 100, responses: 2 }, "2026-05-11": { pct: 100, responses: 3 },
+    "2026-05-12": { pct: 100, responses: 3 }, "2026-05-13": { pct: 100, responses: 6 },
+    "2026-05-14": { pct: 100, responses: 8 }, "2026-05-15": { pct: 67, responses: 3 },
+    "2026-05-18": { pct: 100, responses: 2 }, "2026-05-19": { pct: 83, responses: 6 },
+    "2026-05-20": { pct: 100, responses: 6 }, "2026-05-21": { pct: 100, responses: 2 },
+    "2026-05-22": { pct: 100, responses: 4 }, "2026-05-26": { pct: 100, responses: 4 },
+    "2026-05-27": { pct: 90, responses: 10 }, "2026-05-28": { pct: 100, responses: 3 },
+    "2026-05-29": { pct: 100, responses: 5 }, "2026-05-30": { pct: 100, responses: 1 },
+    "2026-06-01": { pct: 100, responses: 3 },
   };
 
   // SMS data from Aircall messages export (April-May 2026)
@@ -9056,6 +9200,29 @@ function testWeeklySummaryEmail() {
 }
 
 // Test: Monthly Summary email with this month's data
+// Rerun monthly summary for a specific month.
+// Set MONTHLY_RERUN_DATE to any date within the target month (e.g., "2026-05-15").
+// Sends to TEST_EMAIL.
+function rerunMonthlySummary() {
+  loadThresholds();
+  const props = PropertiesService.getScriptProperties();
+  const targetDate = props.getProperty("MONTHLY_RERUN_DATE");
+  if (!targetDate) {
+    Logger.log("MONTHLY_RERUN_DATE not set — set it to any date within the target month (e.g., 2026-05-15)");
+    return;
+  }
+  const testEmail = props.getProperty("TEST_EMAIL") || "";
+  if (!testEmail) {
+    Logger.log("TEST_EMAIL not set — need a recipient for the rerun");
+    return;
+  }
+  const tz = CONFIG.businessHours.timezone;
+  const d = new Date(targetDate + "T17:00:00");
+  Logger.log("Rerunning monthly summary for month containing " + targetDate);
+  sendMonthlySummary(d, tz, testEmail);
+  Logger.log("Monthly rerun sent to " + testEmail);
+}
+
 function testMonthlySummaryEmail() {
   const testEmail = getTestEmail_();
   loadThresholds();
