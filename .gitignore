@@ -11,13 +11,17 @@ Thumbs.db
 *.csv
 *.zip
 
-# Old versions / drafts
+# Documents and internal files
 *.docx
 *.pdf
 *.html
 *.json
-
-# Keep only the script and docs
-!cs_command_center_apps_script_v2.js
+*.md
 !README.md
+
+# Keep only the script, readme, gitignore, and screenshots
+!cs_command_center_apps_script_v2.js
 !.gitignore
+!dashboard_screenshot.png
+!agent_hub_screenshot.png
+!monthly_email_screenshot.png

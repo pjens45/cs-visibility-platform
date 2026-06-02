@@ -1,166 +1,128 @@
-# CS Command Center
+# CS Intelligence Platform
 
-A real-time customer support dashboard built on Google Apps Script.
+AI-powered customer support intelligence built on Google Apps Script. Unifies your ticket system, phone platform, CSAT tools, and social channels into a single operational view - then uses an LLM to tell you what your customers are actually saying.
+
+Real-time dashboard. Per-agent performance metrics. Automated daily, weekly, and monthly email summaries with theme analysis and sentiment classification. One file. Zero new vendors.
 
 ## The problem
 
-Our CS tech stack is composed of a curated selection of purpose-built tools — Zendesk for tickets, Aircall for phones, Nicereply for CSAT, Meta Business Suite for social. From a management perspective this creates a fragmented view of operations. There's no single place to assess queue health, SLA compliance, agent workload, and customer satisfaction in real time. No way to deploy resources efficiently or follow up on key events promptly without checking four different apps.
+Most CS teams run best-in-class tools for each channel - a ticket system, a phone platform, a CSAT provider, a social inbox. Each tool is great at what it does. But each ships with its own dashboard, its own KPI definitions, and its own walled garden.
+
+That creates two gaps:
+
+- **Operations** - there's no single place to see queue health, SLA compliance, agent workload, and customer satisfaction across channels simultaneously. Reporting from each tool uses different underlying rules, so metrics don't reconcile across sources. You end up checking four dashboards and still not knowing where to deploy resources.
+
+- **Signal** - every ticket contains information about what customers are actually experiencing: product issues, recurring failures, emerging patterns. That signal is invisible at scale. No one has time to read every ticket, so the intelligence just sits there.
 
 ## The solution
 
-A single Google Apps Script file that pulls from all four APIs and renders a consolidated real-time command center inside Google Sheets. Refreshes every 5 minutes. Zero additional cost, no new tools to learn, no vendor to manage.
+A single Google Apps Script file that connects to your support APIs and closes both gaps. No infrastructure to manage, no vendor to evaluate, no budget to approve - it runs inside Google Sheets.
 
-![CS Command Center Dashboard](dashboard_screenshot.png)
+Three products, one codebase:
 
-### What it tracks
+### Command Center
 
-**Email (Zendesk)**
-- Open ticket count, on-hold count, unassigned count
-- SLA compliance — tickets waiting longer than configurable business hours without a first reply
-- Per-agent breakdown: assigned, past SLA, longest wait, solved today
-- New SAS answering service tickets (detection via tag, subject, and requester)
-- Oldest waiting tickets table with clickable links to Zendesk
-- Flagged tickets (high priority, warranty, escalated, VIP)
-- Email CSAT survey results from Nicereply (last 24 hours)
+Real-time operations dashboard. Refreshes every 5 minutes. Email queue health, phone answer rates, social DM response times, CSAT scores, per-agent workload, and AI-powered volume spike detection - all in one view with configurable health indicators (Healthy / Watch / At Risk) per channel.
 
-**Phone (Aircall)**
-- Answer rate (business hours only, Mon–Fri 6a–5p PST)
-- Per-agent inbound/outbound call volume with short-call breakdown
-- Missed calls forwarded to answering service with reason detection
-- SMS activity per agent with recent message preview
-- Post-call CSAT survey results
+![Command Center](dashboard_screenshot.png)
 
-**Social (Meta Business Suite)**
-- Facebook Messenger DMs — unread count, conversation list with excerpts
-- Instagram DMs — merged with Messenger, tagged by platform (FB/IG)
-- Facebook and Instagram post comments (last 24 hours)
-- Instagram @mentions and tags (last 24 hours)
-- Deep links to Meta Business Suite inbox for each conversation and comment
-- Token expiry monitoring with 7-day warning
+### Agent Hub
 
-**Customer satisfaction (Nicereply)**
-- Email CSAT score and percentage (last 24 hours)
-- Individual survey responses with score, customer name, ticket link, and timestamp
+Personal performance dashboard for each CS agent. Current queue (assigned tickets, past SLA, oldest waiting), today's activity across email and phone, CSAT reviews, and last week's stats benchmarked against the team average. Agents can self-prioritize and self-assess without asking a manager for a report.
 
-**Dashboard health indicators**
-- Email status: Healthy / Watch / At Risk (based on SLA breach count)
-- Phone status: Healthy / Watch / At Risk (based on answer rate)
-- Social status: Healthy / Watch / At Risk (based on oldest unread DM response time)
-- All thresholds configurable via Script Properties
+![Agent Hub](agent_hub_screenshot.png)
+
+### AI Recap
+
+Automated email summaries powered by Claude AI. Four cadences:
+
+- **Daily** - end-of-day snapshot with channel health badges, the top 3 customer themes identified by AI (with representative quotes and direct ticket links), per-agent stats, and comparison to the previous working day
+- **Weekly** - Customer Kudos (top CSAT quotes selected by AI), health trend charts, theme trend analysis, full metrics with week-over-week deltas
+- **Monthly** - health trends across the full month, theme trends with ticket volume and customer tone analysis, per-agent performance with month-over-month deltas, feature request aggregation
+- **Non-working day** - lightweight queue snapshot so you know what's waiting Monday morning
+
+![Monthly AI Recap Email](monthly_email_screenshot.png)
+
+The AI layer identifies the top 3 patterns across all tickets and calls each day, classifies customer sentiment per ticket, and surfaces representative quotes - turning raw volume into a narrative a manager can act on in 30 seconds.
+
+## What it can track
+
+The current implementation integrates with Zendesk, Aircall, Nicereply, Meta Business Suite, and the Anthropic API. The pattern is adaptable to other tools in each category.
+
+**Tickets** - open count, on hold, unassigned, SLA compliance (configurable business hours), per-agent assigned/past SLA/solved, oldest waiting with direct links, flagged tickets (priority, warranty, escalated), tickets created, voicemails
+
+**Phone** - answer rate (business hours only), per-agent inbound/outbound with talk time, missed calls with reason detection, text message activity per agent
+
+**Social** - DMs across platforms (merged, tagged by source), unread count with conversation excerpts, comments and mentions, deep links to inbox, token expiry monitoring
+
+**Customer satisfaction** - email CSAT and phone CSAT with per-agent attribution, individual review detail with ticket links
+
+**AI analysis** - daily top 3 themes via Claude, customer sentiment classification (Neutral / Frustrated / Angry), weekly and monthly trend aggregation from historical theme data, volume spike detection with AI-generated context
+
+**Health indicators** - per-channel health status (email, phone, social) based on configurable thresholds, tracked historically for trend visualization
 
 ## Tech stack
 
 - **Runtime**: Google Apps Script (V8)
-- **UI**: Google Sheets (formatted programmatically — no add-ons)
-- **APIs**: Zendesk REST API, Aircall REST API, Nicereply REST API, Meta Graph API v25.0
-- **Auth**: API tokens stored in Apps Script Script Properties (never committed to code)
-- **Scheduling**: Apps Script time-driven trigger (5-minute interval)
-- **Dependencies**: None — single file, no build step, no external libraries
-
-## Setup
-
-1. Open a new Google Sheet
-2. Go to **Extensions → Apps Script**
-3. Paste `cs_command_center_apps_script_v2.js` into `Code.gs` (replace everything)
-4. Go to **Project Settings** (gear icon) → **Script Properties** and add:
-
-| Property | Value |
-|----------|-------|
-| `ZENDESK_TOKEN` | `your_email/token:your_api_token` |
-| `AIRCALL_API_ID` | `your_aircall_api_id` |
-| `AIRCALL_API_TOKEN` | `your_aircall_api_token` |
-| `NICEREPLY_TOKEN` | `your_email:your_nicereply_api_key` |
-| `META_PAGE_TOKEN` | `your_meta_page_access_token` |
-| `META_PAGE_ID` | `your_facebook_page_id` |
-| `META_IG_TOKEN` | `your_instagram_login_access_token` (optional — for IG DMs) |
-
-5. Select `initializeSheet` from the function dropdown, click **Run**
-6. Select `setupTrigger` from the function dropdown, click **Run**
-
-### Optional Script Properties
-
-SLA thresholds default to sensible values but can be overridden per-deployment:
-
-| Property | Default | Description |
-|----------|---------|-------------|
-| `SLA_EMAIL_GREEN` | `12` | Business hours before a ticket is "past SLA" |
-| `SLA_EMAIL_YELLOW` | `24` | Threshold for yellow/watch state |
-| `SLA_BACKLOG_GREEN` | `30` | Open ticket count — green ceiling |
-| `SLA_BACKLOG_YELLOW` | `50` | Open ticket count — yellow ceiling |
-| `SLA_PHONE_GREEN` | `75` | Answer rate % — green floor |
-| `SLA_PHONE_YELLOW` | `60` | Answer rate % — yellow floor |
-| `SLA_FRT_GREEN` | `12` | Median first reply time (biz hrs) — green ceiling |
-| `SLA_FRT_YELLOW` | `24` | Median first reply time (biz hrs) — yellow ceiling |
-| `SLA_WAIT_GREEN` | `30` | Average wait time (min) — green ceiling |
-| `SLA_WAIT_YELLOW` | `60` | Average wait time (min) — yellow ceiling |
-| `SLA_SOCIAL_GREEN` | `120` | Social oldest unread DM (min) — green ceiling |
-| `SLA_SOCIAL_YELLOW` | `360` | Social oldest unread DM (min) — yellow ceiling |
-
-### Meta Business Suite setup
-
-1. Create a Meta App at [developers.facebook.com](https://developers.facebook.com)
-2. Add the Messenger product
-3. Generate a Page Access Token with permissions: `pages_messaging`, `pages_read_engagement`, `instagram_basic`, `instagram_manage_messages`, `instagram_manage_comments`, `business_management`
-4. Extend to a long-lived token (60-day expiry) via the Access Token Debugger
-5. The script auto-discovers your Instagram Business Account ID from the linked Page
-
-#### Instagram DMs (optional)
-
-Instagram DMs require a separate token from the Instagram Login OAuth flow:
-
-1. In your Meta App, go to **Instagram API > API setup with Instagram login**
-2. Add the permissions: `instagram_business_basic`, `instagram_business_manage_messages`, `instagram_business_manage_comments`
-3. Add your Instagram account as an **Instagram Tester** under **App roles** and accept the invitation from Instagram Settings > Website permissions
-4. Set up **Business Login** with a redirect URI (e.g., `https://localhost/`)
-5. Visit the OAuth URL: `https://www.instagram.com/oauth/authorize?client_id={IG_APP_ID}&redirect_uri=https://localhost/&response_type=code&scope=instagram_business_basic,instagram_business_manage_messages,instagram_business_manage_comments`
-6. Authorize the app, capture the `code` parameter from the redirect URL
-7. Exchange for a short-lived token: `POST https://api.instagram.com/oauth/access_token` with `client_id`, `client_secret`, `grant_type=authorization_code`, `redirect_uri`, `code`
-8. Exchange for a long-lived token (60 days): `GET https://graph.instagram.com/access_token?grant_type=ig_exchange_token&client_secret={SECRET}&access_token={SHORT_TOKEN}`
-9. Add the long-lived token as `META_IG_TOKEN` in Script Properties
-
-## Configuration
-
-All configuration is in the `CONFIG` object at the top of the script:
-
-- `agents` — CS team member names (drives per-agent breakdowns)
-- `excludeAgents` — people who use Zendesk but aren't on the CS team (filtered from all stats)
-- `excludeSMSLines` — Aircall lines to exclude from SMS tracking (sales reps, etc.)
-- `supportNumbers` — Aircall phone numbers for CS support lines
-- `answeringServiceNumber` — external answering service number (for SAS forwarding detection)
-- `businessHours` — timezone, start/end hour, work days (for answer rate and SLA calculations)
+- **UI**: Google Sheets (formatted programmatically, no add-ons)
+- **Data layer**: Google Sheets (Daily Metrics Log, Daily Themes Log, Health Badge Log)
+- **AI**: Anthropic Claude Haiku with prompt caching
+- **Email delivery**: Gmail (HTML emails via GmailApp)
+- **Auth**: API tokens in Script Properties (never in code)
+- **Scheduling**: Apps Script time-driven triggers (5-min dashboard, daily/weekly/monthly emails)
+- **Dependencies**: None. Single file, no build step, no external libraries
 
 ## Architecture
 
 ```
-┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
-│   Zendesk   │  │   Aircall   │  │  Nicereply  │  │  Meta Graph │
-│  REST API   │  │  REST API   │  │  REST API   │  │  API v25.0  │
-└──────┬──────┘  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘
-       │                │                │                │
-       └────────┬───────┴────────────────┴────────────────┘
-                │
-      ┌─────────▼──────────┐
-      │  Google Apps Script  │
-      │  (Code.gs — single   │
-      │   file, ~3600 LOC)   │
-      └─────────┬──────────┘
-                │
-      ┌─────────▼──────────┐
-      │   Google Sheets      │
-      │   Dashboard tab      │
-      │   (auto-formatted)   │
-      └────────────────────┘
+                          ┌────────────────────────────┐
+                          │    LLM API (Claude Haiku)   │
+                          └──────────────┬─────────────┘
+                                         │
+   ┌────────────┐  ┌────────────┐        │        ┌────────────┐  ┌────────────┐
+   │ Tickets API│  │  Phone API │        │        │  CSAT API  │  │ Social API │
+   └─────┬──────┘  └─────┬──────┘        │        └─────┬──────┘  └─────┬──────┘
+         │               │               │              │               │
+         └───────────────┴───────────────┼──────────────┴───────────────┘
+                                          │
+                   ┌──────────────────────▼──────────────────────┐
+                   │            Google Apps Script                │
+                   │          (single file, ~9,400 LOC)           │
+                   └──────────────────────┬──────────────────────┘
+                                          │
+                  ┌───────────────────────┴───────────────────────┐
+                  │                                               │
+   ┌──────────────▼───────────────┐         ┌─────────────────────▼──────────────────┐
+   │         Google Sheets         │         │                 Gmail                   │
+   │  Dashboard, Agent Hub,        │         │  Daily recap, Weekly summary,           │
+   │  Metrics Log, Themes Log,     │         │  Monthly report, Non-working day        │
+   │  Health Badges                │         │  snapshot                               │
+   └──────────────────────────────┘         └─────────────────────────────────────────┘
 ```
 
-The script runs on a 5-minute trigger. Each refresh fetches fresh data from all four APIs, processes it, and overwrites the Dashboard sheet. A staging sheet is used during writes to prevent the dashboard from flickering mid-update. Raw data is also written to hidden tabs for debugging.
+The script runs on a 5-minute trigger for the dashboard and scheduled triggers for emails. Each dashboard refresh pulls fresh data from all APIs, processes it, and overwrites the sheet via a staging buffer to prevent flicker. The email recaps aggregate from data layer sheets that accumulate over time, giving trend analysis its historical context.
 
-The dashboard uses a three-column layout — Email (left), Phone (center), Social (right) — with independent health status indicators per channel and shared KPI cards at the top.
+## Getting started
+
+This implementation connects to Zendesk, Aircall, Nicereply, and Meta Business Suite. To adapt it to your stack, you'd swap the API fetch functions - the dashboard rendering, email generation, and AI analysis layers are tool-agnostic.
+
+1. Open a new Google Sheet
+2. Go to **Extensions > Apps Script**
+3. Paste `cs_command_center_apps_script_v2.js` into `Code.gs`
+4. Add your API credentials in **Project Settings > Script Properties**
+5. Run `initializeSheet`, then `setupTrigger`
+6. For email recaps, run `setupEmailTriggers`
+
+### Configuration
+
+All configuration is in the `CONFIG` object at the top of the script: agent names, excluded users, phone lines, business hours, SLA thresholds, email recipients. Health status thresholds (Healthy / Watch / At Risk) are stored in Script Properties and can be tuned per deployment.
 
 ## Known limitations
 
-- **Instagram DMs**: Requires a separate Instagram Login access token (`META_IG_TOKEN`) with the `instagram_business_manage_messages` permission. This token is obtained through the Instagram Login OAuth flow — not the Facebook Login flow used for the Page token. If `META_IG_TOKEN` is not set, the script falls back to the Page token (which typically returns empty for IG DMs). The IG token is long-lived (60 days) and must be refreshed before expiry; the dashboard warns at 7 days remaining.
-- **Missed call customer info**: Aircall's API does not expose contact details for certain missed call scenarios. The dashboard shows "Check Aircall #[call ID]" with a link to the call record instead.
+- **Queue state metrics** are point-in-time snapshots, so weekly/monthly averages only cover days where the dashboard was running
+- **AI theme analysis** requires an Anthropic API key; without it, everything else still works but theme sections are skipped
+- **Social DM tokens** expire and need periodic refresh (the dashboard monitors expiry and warns at 7 days)
 
 ## Security
 
-All API credentials and SLA thresholds are stored in Google Apps Script Script Properties — never in the source code. The committed file contains no secrets.
+All API credentials and thresholds live in Script Properties - never in the source code. The committed file contains no secrets and no customer data.
