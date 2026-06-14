@@ -87,7 +87,7 @@ The current implementation integrates with Zendesk, Aircall, Nicereply, Meta Bus
                                           │
                    ┌──────────────────────▼──────────────────────┐
                    │            Google Apps Script                │
-                   │          (single file, ~13,900 LOC)          │
+                   │          (single file, ~12,800 LOC)          │
                    └──────────────────────┬──────────────────────┘
                                           │
                   ┌───────────────────────┴───────────────────────┐
